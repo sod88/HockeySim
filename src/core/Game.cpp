@@ -18,13 +18,13 @@ constexpr float kPuckR = 0.25f;
 
 // Calibration knobs. tools/headless_sim checks league-wide output against NHL averages.
 namespace tune {
-constexpr float shootUrge = 0.05f;     // per carrier decision, scaled by shot quality and shot rate
+constexpr float shootUrge = 0.035f;    // per carrier decision, scaled by shot quality and shot rate
 constexpr float goalScale = 0.65f;     // multiplies P(goal | on net)
-constexpr float hitRate = 0.12f;       // per second while an opponent is within reach of the carrier
+constexpr float hitRate = 0.088f;      // per second while an opponent is within reach of the carrier
 constexpr float pokeRate = 0.22f;      // stick checks per second, same condition
 constexpr float blockChance = 0.65f;   // when a shot passes within reach of a defender
-constexpr float penaltyOnHit = 0.056f;
-constexpr float penaltyOnPoke = 0.034f;
+constexpr float penaltyOnHit = 0.048f;
+constexpr float penaltyOnPoke = 0.022f;
 }  // namespace tune
 
 const float kFShift[4] = {56.f, 48.f, 38.f, 28.f};  // forward line shift lengths (s): top lines play more
@@ -32,6 +32,14 @@ const float kDShift[3] = {60.f, 50.f, 40.f};
 
 float n01(float rating) { return clamp01((rating - 40.f) / 59.f); }
 float discipline(const Player& p) { return std::exp((70.f - p.r.discipline) / 15.f); }
+
+// Free-puck friction in updatePuck is dv/dt = -(5 + 0.15 v), so a puck released at v rolls this far (ft).
+float rollDistance(float v) { return (v - (5.f / 0.15f) * std::log1p(v * 0.15f / 5.f)) / 0.15f; }
+float speedToRoll(float d) {
+    float lo = 0, hi = 150;
+    for (int i = 0; i < 30; ++i) { float m = 0.5f * (lo + hi); (rollDistance(m) < d ? lo : hi) = m; }
+    return lo;
+}
 
 // Keeps a circle of radius r inside the rounded-rectangle boards. Returns true on contact.
 bool constrainRink(Vec2& p, Vec2& v, float r, float restitution) {
@@ -289,7 +297,9 @@ void Game::beginFaceoff(Vec2 dot) {
     puck_ = Puck{};
     puck_.pos = dot;
     touches_.clear();
-    for (int s = 0; s < 2; ++s) lineChanges(s, true);
+    for (int s = 0; s < 2; ++s)
+        if (s != noChangeSide_) lineChanges(s, true);
+    noChangeSide_ = -1;
     for (auto& b : bodies_) {
         if (!b.active) continue;
         b.target = faceoffSpot(b, dot);
@@ -795,19 +805,28 @@ void Game::carrierThink(Body& b) {
         if (pressureD < 4.f) pPass = std::min(1.f, pPass * 1.5f + 0.1f);
         pPass *= 0.6f + 0.4f * n01(P.r.passing);
         if (rng_.chance(pPass)) {
-            float sp = std::clamp(dist(b.pos, bestAim) * 0.9f + 28.f, 35.f, 78.f);
+            float pd = dist(b.pos, bestAim);
+            float sp = std::clamp(pd * 0.9f + 28.f, 35.f, 78.f);
+            // From behind the red line, keep a missed pass from rolling out for icing (never below what reaches the target).
+            float ahead = (bestAim.x - b.pos.x) * s / std::max(pd, 1.f);
+            if (px < 0 && ahead > 0.05f) sp = std::min(sp, std::max(speedToRoll((rink::kGoalLineX - px) / ahead - 4.f), speedToRoll(pd + 10.f)));
             pass(b, best, sp, bestAim);
             return;
         }
     }
 
-    // Dump it in, or clear it out.
-    if (!inOZ && px > -12.f && px < 24.f && pressureD < 9.f && rng_.chance(0.25f)) {
+    // Dump it in (only once over the red line, or it's icing), or clear it out.
+    if (!inOZ && px > 2.f && px < 24.f && pressureD < 9.f && rng_.chance(0.25f)) {
         chip(b, Vec2(s * 94.f, (rng_.chance(0.5f) ? 1.f : -1.f) * 30.f), 62.f);
         return;
     }
     if (inDZ && pressureD < 4.f && rng_.chance(0.3f)) {
-        chip(b, Vec2(s * 5.f, (b.pos.y >= 0 ? 1.f : -1.f) * 40.f), 66.f);
+        // Off the boards toward the neutral zone, hard enough to get out but meant to die before the far goal line.
+        // A shorthanded team can fire it the length of the ice.
+        Vec2 aim(s * 10.f, (b.pos.y >= 0 ? 1.f : -1.f) * 40.f);
+        bool pk = skatersFor(side) < skatersFor(1 - side);
+        float roll = pk ? 250.f : dist(b.pos, aim) + rng_.range(15.f, 55.f);
+        chip(b, aim, std::clamp(speedToRoll(roll), 40.f, 72.f));
         return;
     }
 
@@ -854,6 +873,7 @@ void Game::gainControl(Body& b) {
     puck_.goalBound = false;
     puck_.idle = 0;
     puck_.lastTeam = b.team;
+    puck_.iceTeam = -1;
     b.possessedFor = 0;
     b.think = rng_.range(0.08f, 0.2f);
     if (touches_.empty() || touches_.back().team != b.team) touches_.clear();
@@ -873,6 +893,7 @@ void Game::loosePuck(Vec2 vel) {
     puck_.carrier = -1;
     puck_.vel = vel;
     puck_.passTarget = -1;
+    puck_.iceTeam = -1;
 }
 
 void Game::shoot(Body& b) {
@@ -924,6 +945,7 @@ void Game::shoot(Body& b) {
     sh.origin = b.pos;
     b.ignorePuck = 0.3f;
     b.oneTimerUntil = -1;
+    armIcing(side, b.pos);
     tg_[side].attempts++;
     tg_[side].stats[b.roster].attempts++;
 }
@@ -939,6 +961,7 @@ void Game::pass(Body& from, int toBody, float speed, Vec2 aim) {
     puck_.shot.live = false;
     puck_.lastTeam = from.team;
     from.ignorePuck = 0.3f;
+    armIcing(from.team, from.pos);
 }
 
 void Game::chip(Body& from, Vec2 aim, float speed) {
@@ -950,6 +973,7 @@ void Game::chip(Body& from, Vec2 aim, float speed) {
     puck_.shot.live = false;
     puck_.lastTeam = from.team;
     from.ignorePuck = 0.4f;
+    armIcing(from.team, from.pos);
 }
 
 // ======================================================= puck physics ===
@@ -982,6 +1006,7 @@ void Game::updatePuck(float h) {
         float yc = prev.y + (p.pos.y - prev.y) * t;
         if (std::fabs(yc) >= rink::kNetHalfWidth - kPuckR) continue;
         int defending = tg_[0].dir == -int(sg) ? 0 : 1;
+        p.iceTeam = -1;  // on net: a shot, not icing
         if (!p.goalBound) {
             resolveAtNet(defending, true);
             if (phase_ != Phase::Play) return;
@@ -989,6 +1014,7 @@ void Game::updatePuck(float h) {
         if (p.goalBound) { scoreGoal(1 - defending); return; }
         prev = p.pos;  // saved: resolveAtNet moved the puck out front
     }
+    if (checkIcing(prev)) return;
 
     // A shot on net arriving at the goalie.
     if (p.shot.live && p.shot.onNet && !p.shot.resolved) {
@@ -1033,6 +1059,7 @@ void Game::updatePuck(float h) {
                 p.vel = rotate((-p.vel).norm(), rng_.range(-1.2f, 1.2f)) * (spd * rng_.range(0.12f, 0.3f));
                 p.shot.live = false;
                 p.lastTeam = def;
+                p.iceTeam = -1;
                 break;
             }
         }
@@ -1096,6 +1123,7 @@ void Game::resolveAtNet(int defending, bool atLine) {
     p.goalBound = false;
     p.passTarget = -1;
     p.lastTeam = defending;
+    p.iceTeam = -1;
     D.lastSave = time_;
     g.ignorePuck = 0.6f;
 }
@@ -1177,6 +1205,36 @@ void Game::callPenalty(int side, int roster, const char* infraction) {
     whistle(zoneDot(side, puck_.pos.y >= 0 ? 1.f : -1.f), opt_.whistlePause, "");
 }
 
+// Icing is armed when a team sends the puck from its own side of the red line, and disarmed by any
+// touch, block or goalie play. A shorthanded team may ice it.
+void Game::armIcing(int side, Vec2 from) {
+    bool behindRed = from.x * float(tg_[side].dir) < 0;
+    puck_.iceTeam = behindRed && skatersFor(side) >= skatersFor(1 - side) ? side : -1;
+    puck_.iceY = from.y;
+}
+
+// Called after the puck moves. Hybrid icing: waved off when an attacker would win the race to the puck.
+bool Game::checkIcing(Vec2 prev) {
+    int side = puck_.iceTeam;
+    if (side < 0) return false;
+    float s = float(tg_[side].dir);
+    if (!(prev.x * s < rink::kGoalLineX && puck_.pos.x * s >= rink::kGoalLineX)) return false;
+    puck_.iceTeam = -1;
+    float att = 1e9f, def = 1e9f;
+    for (int slot = 0; slot < 5; ++slot) {
+        const Body& a = bodies_[side * 6 + slot];
+        const Body& d = bodies_[(1 - side) * 6 + slot];
+        if (a.active) att = std::min(att, dist(a.pos, puck_.pos));
+        if (d.active) def = std::min(def, dist(d.pos, puck_.pos));
+    }
+    if (att < def) return false;
+    tg_[side].icings++;
+    noChangeSide_ = side;
+    whistle(zoneDot(side, puck_.iceY >= 0 ? 1.f : -1.f), opt_.whistlePause, "");
+    log(EventType::Icing, side, std::string("Icing, ") + team(side).info.abbr);
+    return true;
+}
+
 void Game::puckControl(float) {
     if (puck_.carrier >= 0 || puck_.goalBound) return;
 
@@ -1204,6 +1262,7 @@ void Game::puckControl(float) {
             puck_.passFrom = g.pos;
             puck_.lastTeam = side;
             g.ignorePuck = 1.f;
+            armIcing(side, g.pos);
             return;
         }
     }

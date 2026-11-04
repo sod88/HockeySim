@@ -84,20 +84,25 @@ top 6 D in pairs, starter = the goalie with the most games.
 - Hits, stick checks, minor penalties (rate from discipline), power plays (top unit
   goes out), line changes on shift timers with fatigue, faceoffs, 3-on-3 overtime and
   a shootout.
+- Hybrid icing: a puck sent from behind the red line that crosses the far goal line
+  untouched is whistled unless an attacker wins the race to it; faceoff in the offending
+  team's zone and they can't change lines. Shorthanded teams may ice it. The AI sizes
+  clears and passes from its own half so they die before the goal line.
 
 ### Calibration (400 headless games, `./build/headless_sim data 400`)
 
 | Per team per game | Sim | NHL |
 | --- | --- | --- |
-| Goals | 3.09 | 3.0–3.1 |
-| Shots on goal | 30.5 | 28–29 |
-| Shot attempts | 57.7 | 55–60 |
-| Blocked shots | 12.7 | 13–15 |
-| Hits | 22.0 | 20–24 |
-| Power plays | 2.77 | 2.8–3.2 |
-| Power-play % | 16.8% | 20–22% |
-| Save % | .899 | .900–.905 |
-| Games to OT | 15.5% | 22–25% |
+| Goals | 3.15 | 3.0–3.1 |
+| Shots on goal | 32.0 | 28–29 |
+| Shot attempts | 57.9 | 55–60 |
+| Blocked shots | 11.3 | 13–15 |
+| Hits | 23.2 | 20–24 |
+| Power plays | 3.08 | 2.8–3.2 |
+| Power-play % | 14.3% | 20–22% |
+| Icings | 3.98 | |
+| Save % | .901 | .900–.905 |
+| Games to OT | 17.2% | 22–25% |
 
 Tuning knobs live in `namespace tune` at the top of `Game.cpp`.
 `headless_sim --box EDM COL` prints one full box score; `--ratings` lists team ratings;
@@ -105,8 +110,8 @@ Tuning knobs live in `namespace tune` at the top of `Game.cpp`.
 
 ## Known gaps / next steps
 
-- No offside or icing yet; line changes swap players in place instead of using the bench door.
-- Power plays convert a bit low and OT is a little rare; both are tuning targets.
+- No offside yet; line changes swap players in place instead of using the bench door.
+- Power plays convert low, blocks run a little low and OT is a little rare; all are tuning targets.
 - Skating speed is a proxy until a tracking-data source is added.
 - Ideas: a season mode with standings, trades and injuries; a player-controlled skater;
   real jersey numbers and depth-chart overrides from a config file.

@@ -46,4 +46,4 @@ Three CMake targets: `hkcore` (static lib, `src/core/`, **no graphics dependenci
 
 ## Known gaps (from README)
 
-No offside or icing; power-play % and OT frequency run below NHL targets; skating is a proxy rating.
+No offside; power-play %, blocked shots and OT frequency run below NHL targets; skating is a proxy rating.

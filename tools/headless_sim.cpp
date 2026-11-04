@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
 
     struct Rec { int gp = 0, w = 0, l = 0, otl = 0, gf = 0, ga = 0; };
     std::vector<Rec> rec(L.teams.size());
-    long goals = 0, sog = 0, att = 0, hits = 0, blocks = 0, ppOpp = 0, ppG = 0, ot = 0, so = 0, saves = 0, shotsAgainst = 0;
+    long goals = 0, sog = 0, att = 0, hits = 0, blocks = 0, ppOpp = 0, ppG = 0, icing = 0, ot = 0, so = 0, saves = 0, shotsAgainst = 0;
     auto t0 = std::chrono::steady_clock::now();
     int n = season ? int(L.teams.size()) * 41 : games;
     for (int i = 0; i < n; ++i) {
@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
         for (int s = 0; s < 2; ++s) {
             const auto& T = g.side(s);
             goals += T.score - (g.wentToShootout() && T.score > g.side(1 - s).score ? 1 : 0);
-            sog += T.sog; att += T.attempts; hits += T.hits; blocks += T.blocks; ppOpp += T.ppOpp; ppG += T.ppGoals;
+            sog += T.sog; att += T.attempts; hits += T.hits; blocks += T.blocks; ppOpp += T.ppOpp; ppG += T.ppGoals; icing += T.icings;
             const auto& G = T.stats[size_t(T.goalie)];
             saves += G.sv; shotsAgainst += G.sa;
         }
@@ -124,6 +124,7 @@ int main(int argc, char** argv) {
     std::printf("%-26s %8.1f %10s\n", "hits", hits / tg, "20-24");
     std::printf("%-26s %8.2f %10s\n", "power plays", ppOpp / tg, "2.8-3.2");
     std::printf("%-26s %7.1f%% %10s\n", "power-play %", ppOpp ? 100.0 * ppG / ppOpp : 0.0, "20-22%");
+    std::printf("%-26s %8.2f %10s\n", "icings", icing / tg, "");
     std::printf("%-26s %8.3f %10s\n", "save %", shotsAgainst ? double(saves) / shotsAgainst : 0.0, ".900-.905");
     std::printf("%-26s %7.1f%% %10s\n", "games to OT", 100.0 * ot / n, "22-25%");
     std::printf("%-26s %7.1f%% %10s\n", "games to shootout", 100.0 * so / n, "8-10%");

@@ -30,7 +30,7 @@ constexpr float kDotY = 22.f;
 
 enum class Phase { FaceoffSetup, Play, Stoppage, Intermission, Final };
 
-enum class EventType { PeriodStart, PeriodEnd, Faceoff, Shot, Goal, Block, Miss, Hit, Takeaway, Penalty, PenaltyExpired, Whistle, Shootout, Final };
+enum class EventType { PeriodStart, PeriodEnd, Faceoff, Shot, Goal, Block, Miss, Hit, Takeaway, Penalty, PenaltyExpired, Whistle, Icing, Shootout, Final };
 
 struct GameEvent {
     int period;
@@ -57,6 +57,7 @@ struct TeamGame {
     int dir = 1;   // +1 attacks the +x net this period
     int score = 0, sog = 0, attempts = 0, hits = 0, blocks = 0, fow = 0, ppOpp = 0, ppGoals = 0, pim = 0, takeaways = 0;
     int soGoals = 0, soAttempts = 0;
+    int icings = 0;
     int goalie = 0;  // roster index of the goalie in net
     std::vector<PlayerLine> stats;  // by roster index
     std::vector<float> energy;      // by roster index, 0..1
@@ -97,6 +98,8 @@ struct Puck {
     Vec2 passFrom;
     ShotInfo shot;
     float idle = 0;
+    int iceTeam = -1;  // team that sent the puck from behind the red line, untouched since (-1 = no icing possible)
+    float iceY = 0;    // where it was released, for the faceoff side
 };
 
 struct GameOptions {
@@ -149,6 +152,7 @@ private:
     Vec2 faceoffDot_;
     Vec2 nextFaceoff_;
     bool shootoutDone_ = false;
+    int noChangeSide_ = -1;  // iced the puck: can't change lines for the next faceoff
     struct Touch { int team, roster; };
     std::vector<Touch> touches_;
 
@@ -186,6 +190,8 @@ private:
     void resolveAtNet(int defendingSide, bool atLine);
     void scoreGoal(int scoringSide);
     void callPenalty(int side, int roster, const char* infraction);
+    void armIcing(int side, Vec2 from);
+    bool checkIcing(Vec2 prev);
 
     // helpers
     Vec2 attackNet(int side) const { return {tg_[side].dir * rink::kGoalLineX, 0}; }

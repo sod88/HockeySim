@@ -292,7 +292,7 @@ void drawBottom(const App& a) {
     for (auto it = g.events().rbegin(); it != g.events().rend() && shown.size() < 7; ++it) {
         EventType t = it->type;
         if (t == EventType::Goal || t == EventType::Penalty || t == EventType::PeriodEnd || t == EventType::PeriodStart || t == EventType::Final ||
-            t == EventType::Shootout || t == EventType::PenaltyExpired)
+            t == EventType::Shootout || t == EventType::PenaltyExpired || t == EventType::Icing)
             shown.push_back(&*it);
     }
     float yy = y0 + 36;
@@ -441,11 +441,12 @@ void updateGame(App& a, float dt) {
 
     if (!a.paused) g.advance(std::min(dt, 0.05f) * a.speed);
 
-    // Banner for new goals and penalties (shown in real time, independent of sim speed).
+    // Banner for new goals, penalties and icings (shown in real time, independent of sim speed).
     for (; a.seenEvents < g.events().size(); ++a.seenEvents) {
         const GameEvent& e = g.events()[a.seenEvents];
         if (e.type == EventType::Goal) { a.banner = ascii(e.text); a.bannerTime = 2.5f; a.bannerColor = kGold; }
         else if (e.type == EventType::Penalty) { a.banner = "PENALTY  " + ascii(e.text); a.bannerTime = 1.8f; a.bannerColor = Color{240, 120, 120, 255}; }
+        else if (e.type == EventType::Icing && a.bannerTime <= 0) { a.banner = ascii(e.text); a.bannerTime = 1.0f; a.bannerColor = kDim; }
     }
     a.bannerTime = std::max(0.f, a.bannerTime - dt);
 
