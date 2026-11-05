@@ -20,7 +20,7 @@ jobs:
       - name: Single box score and ratings
         run: |
           ./build/headless_sim data --box EDM COL
-          ./build/headless_sim data --ratings
+          ./build/headless_sim data 1 --ratings   # needs a game count, or it also plays a 500-game batch
 
   viewer:
     name: Viewer build (${{ matrix.os }})
