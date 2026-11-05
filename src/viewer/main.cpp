@@ -9,7 +9,11 @@
 // Extra flags (handy for thumbnails / headless checks):
 //   nhl_sim --data DIR --home EDM --away COL --screenshot out.png --after 600   (sim seconds)
 //           --view 2d|3d|wide|end
+//   nhl_sim --home EDM --away COL --script "2:v,4:shot,5:c,7:shot,9:z+3,10:shot,12:quit" [--script-out PREFIX]
+//           plays a live game and fires game-screen actions at wall-clock seconds: v (2D/3D), c (camera),
+//           n (names), z+N / z-N (mouse-wheel notches), s1-s5 (speed), shot (PREFIX_<k>.png), quit
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -503,20 +507,23 @@ void updateCamera(App& a, float dt, bool snap) {
             pos = {0, 150.f, 112.f};
             break;
         default: {  // end zone: above the glass behind the net at the end where the puck is
-            if (p.x * a.endSide < -30.f) a.endSide = -a.endSide;
+            if (p.x * a.endSide < -30.f) { a.endSide = -a.endSide; snap = true; }  // cut to the other end, like TV
             float s = a.endSide;
             tgt = {s * 58.f, 0, -p.y * 0.4f};
             pos = {s * 136.f, 44.f, -p.y * 0.15f};
             break;
         }
     }
-    pos = {tgt.x + (pos.x - tgt.x) * a.zoom, tgt.y + (pos.y - tgt.y) * a.zoom, tgt.z + (pos.z - tgt.z) * a.zoom};
-    float k = snap ? 1.f : 1.f - std::exp(-dt * 2.5f);
+    // Zooming in narrows the lens, so aim further toward the puck or the shot fills up with empty ice.
+    float aim = std::clamp((1.f - a.zoom) / 0.45f, 0.f, 1.f) * 0.85f;
+    tgt = {lerp(tgt.x, p.x, aim), tgt.y, lerp(tgt.z, -p.y, aim)};
+    // Faster sims move the puck further per frame, so the camera eases faster to keep up.
+    float k = snap ? 1.f : 1.f - std::exp(-dt * 2.5f * std::sqrt(std::max(1.f, a.speed / 4.f)));
     auto ease = [k](Vector3& v, Vector3 to) { v = {v.x + (to.x - v.x) * k, v.y + (to.y - v.y) * k, v.z + (to.z - v.z) * k}; };
     ease(a.camera.position, pos);
     ease(a.camera.target, tgt);
     a.camera.up = {0, 1, 0};
-    a.camera.fovy = 26.f;  // across the visible strip
+    a.camera.fovy = 26.f * a.zoom;  // across the visible strip; zoom is a lens zoom, the camera stays put
     a.camera.projection = CAMERA_PERSPECTIVE;
 }
 
@@ -744,6 +751,14 @@ void drawMenu(App& a) {
     if (IsKeyPressed(KEY_ENTER) && a.pick[0] != a.pick[1]) startGame(a);
 }
 
+// Game-screen actions shared by the keyboard and --script.
+void toggleView(App& a) { a.view3d = !a.view3d; a.camSnap = true; }
+void nextCamera(App& a) { a.cam = (a.cam + 1) % 3; a.zoom = 1.f; }
+void zoomBy(App& a, float wheel) {
+    const float tightest[3] = {0.55f, 0.75f, 0.8f};  // the wide and end-zone cameras sit far back; a tight lens there shows empty ice
+    a.zoom = std::clamp(a.zoom * (1.f - 0.1f * wheel), tightest[a.cam], 1.6f);
+}
+
 void updateGame(App& a, float dt) {
     Game& g = *a.game;
     if (IsKeyPressed(KEY_SPACE)) a.paused = !a.paused;
@@ -753,9 +768,9 @@ void updateGame(App& a, float dt) {
     if (IsKeyPressed(KEY_B)) a.showBox = !a.showBox;
     if (IsKeyPressed(KEY_F)) g.playToEnd();
     if (IsKeyPressed(KEY_ESCAPE)) { a.screen = Screen::Menu; return; }
-    if (IsKeyPressed(KEY_V)) { a.view3d = !a.view3d; a.camSnap = true; }
-    if (IsKeyPressed(KEY_C)) a.cam = (a.cam + 1) % 3;
-    if (a.view3d) a.zoom = std::clamp(a.zoom * (1.f - 0.1f * GetMouseWheelMove()), 0.5f, 1.8f);
+    if (IsKeyPressed(KEY_V)) toggleView(a);
+    if (IsKeyPressed(KEY_C)) nextCamera(a);
+    if (a.view3d) zoomBy(a, GetMouseWheelMove());
 
     if (!a.paused) g.advance(std::min(dt, 0.05f) * a.speed);
 
@@ -803,7 +818,7 @@ void drawGame(const App& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string dataDir = "data", shot, home, away, view = "2d";
+    std::string dataDir = "data", shot, home, away, view = "2d", script, scriptOut = "script";
     float after = 0;
     for (int i = 1; i + 1 < argc; ++i) {
         std::string k = argv[i];
@@ -813,6 +828,8 @@ int main(int argc, char** argv) {
         else if (k == "--home") home = argv[++i];
         else if (k == "--away") away = argv[++i];
         else if (k == "--view") view = argv[++i];
+        else if (k == "--script") script = argv[++i];
+        else if (k == "--script-out") scriptOut = argv[++i];
     }
 
     // Find the stats: --data, ./data, or data/ next to the executable (one or two levels up for IDE builds).
@@ -853,8 +870,44 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // --script: a live game with timed actions (see the header comment).
+    struct Step { float t; std::string act; };
+    std::vector<Step> steps;
+    for (size_t p = 0; p < script.size();) {
+        size_t e = script.find(',', p);
+        std::string tok = script.substr(p, e == std::string::npos ? std::string::npos : e - p);
+        size_t c = tok.find(':');
+        if (c != std::string::npos) steps.push_back({float(std::atof(tok.substr(0, c).c_str())), tok.substr(c + 1)});
+        p = e == std::string::npos ? script.size() : e + 1;
+    }
+    size_t nextStep = 0;
+    int shots = 0;
+    float wall = 0, frameSum = 0;
+    int frames = 0;
+    if (!steps.empty()) startGame(a);
+
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
+        bool takeShot = false, quit = false;
+        wall += dt;
+        frameSum += dt;
+        ++frames;
+        for (; nextStep < steps.size() && steps[nextStep].t <= wall; ++nextStep) {
+            const std::string& act = steps[nextStep].act;
+            if (act == "v") toggleView(a);
+            else if (act == "c") nextCamera(a);
+            else if (act == "n") a.names = !a.names;
+            else if (act[0] == 'z') zoomBy(a, float(std::atof(act.c_str() + 1)));
+            else if (act[0] == 's' && act.size() == 2) a.speed = std::array<float, 5>{1, 2, 4, 8, 30}[size_t(std::clamp(act[1] - '1', 0, 4))];
+            else if (act == "shot") takeShot = true;
+            else if (act == "quit") quit = true;
+            const Vector3& cp = a.camera.position;
+            TraceLog(LOG_INFO, "SCRIPT t=%.2f %-5s view=%s cam=%s zoom=%.2f campos=(%.1f,%.1f,%.1f) puck=(%.1f,%.1f) %s %s avgfps=%.0f", wall,
+                     act.c_str(), a.view3d ? "3d" : "2d", kCamNames[a.cam], a.zoom, cp.x, cp.y, cp.z, a.game->puck().pos.x, a.game->puck().pos.y,
+                     a.game->periodLabel().c_str(), clockText(a.game->clock()).c_str(), frames / std::max(frameSum, 1e-3f));
+            if (act == "shot") { frameSum = 0; frames = 0; }
+        }
+        if (quit) break;
         if (a.screen == Screen::Play) updateGame(a, dt);
         else if (a.screen == Screen::Final && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_ESCAPE))) a.screen = Screen::Menu;
 
@@ -863,6 +916,12 @@ int main(int argc, char** argv) {
             case Screen::Menu: drawMenu(a); break;
             case Screen::Play: drawGame(a); break;
             case Screen::Final: drawFinal(a); break;
+        }
+        if (takeShot) {
+            rlDrawRenderBatchActive();
+            Image img = LoadImageFromScreen();
+            ExportImage(img, TextFormat("%s_%d.png", scriptOut.c_str(), ++shots));
+            UnloadImage(img);
         }
         EndDrawing();
     }
