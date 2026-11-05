@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  sim:
+    name: Sim core + calibration sanity check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure (no viewer)
+        run: cmake -S . -B build -DNHL_SIM_VIEWER=OFF
+      - name: Build
+        run: cmake --build build -j
+      - name: 100-game sanity check
+        run: ./build/headless_sim data 100 --check
+      - name: Single box score and ratings
+        run: |
+          ./build/headless_sim data --box EDM COL
+          ./build/headless_sim data --ratings
+
+  viewer:
+    name: Viewer build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install raylib build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libgl1-mesa-dev libwayland-dev libxkbcommon-dev xvfb
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release -j
+      - name: Render a screenshot on a virtual display
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            ./build/nhl_sim --data data --home EDM --away COL --screenshot shot-2d.png --after 600
+          test -s shot-2d.png
+      - name: Upload screenshot
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: viewer-screenshots
+          path: shot-*.png

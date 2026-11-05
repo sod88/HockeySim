@@ -1,7 +1,9 @@
 // Headless batch runner: plays many games without graphics and compares league-wide
 // output with NHL averages. Also prints team ratings and an optional season table.
 //
-//   headless_sim [data_dir] [games] [--season] [--ratings] [--box HOME AWAY]
+//   headless_sim [data_dir] [games] [--season] [--ratings] [--box HOME AWAY] [--check]
+//
+// --check exits non-zero when league averages fall outside broad sanity ranges (used by CI).
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -42,12 +44,13 @@ static void printBox(const Game& g) {
 int main(int argc, char** argv) {
     std::string dataDir = "data";
     int games = 500;
-    bool season = false, ratings = false;
+    bool season = false, ratings = false, check = false;
     std::string boxHome, boxAway;
     std::vector<std::string> pos;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--season")) season = true;
         else if (!std::strcmp(argv[i], "--ratings")) ratings = true;
+        else if (!std::strcmp(argv[i], "--check")) check = true;
         else if (!std::strcmp(argv[i], "--box") && i + 2 < argc) { boxHome = argv[i + 1]; boxAway = argv[i + 2]; i += 2; }
         else pos.push_back(argv[i]);
     }
@@ -140,6 +143,25 @@ int main(int argc, char** argv) {
                     double(g_diag.mods[1]) / g_diag.mods[4], double(g_diag.mods[2]) / g_diag.mods[4], double(g_diag.mods[3]) / g_diag.mods[4]);
     }
 #endif
+    if (check) {
+        // Deliberately wide: these catch a broken sim, not tuning drift.
+        struct Range { const char* name; double v, lo, hi; };
+        const Range ranges[] = {
+            {"goals", goals / tg, 2.2, 4.3},
+            {"shots on goal", sog / tg, 22, 42},
+            {"shot attempts", att / tg, 42, 78},
+            {"hits", hits / tg, 12, 36},
+            {"power plays", ppOpp / tg, 1.5, 5.0},
+            {"icings", icing / tg, 0.5, 10},
+            {"save %", shotsAgainst ? double(saves) / shotsAgainst : 0.0, 0.870, 0.930},
+            {"games to OT", double(ot) / n, 0.03, 0.40},
+        };
+        int bad = 0;
+        for (const Range& r : ranges)
+            if (!(r.v >= r.lo && r.v <= r.hi)) { std::printf("CHECK FAILED: %s = %.3f, expected %.3f-%.3f\n", r.name, r.v, r.lo, r.hi); ++bad; }
+        if (bad) return 1;
+        std::printf("check: all league averages within sanity ranges\n");
+    }
     if (season) {
         std::vector<int> idx(rec.size());
         for (size_t i = 0; i < idx.size(); ++i) idx[i] = int(i);
