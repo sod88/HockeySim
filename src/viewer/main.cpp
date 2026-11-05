@@ -1,12 +1,14 @@
-// NHL Sim viewer: pick two teams, watch the 2D match, read the box score.
+// NHL Sim viewer: pick two teams, watch the match in 2D or 3D, read the box score.
 //
 // Controls
 //   Menu:   Up/Down choose team, Left/Right switch Away/Home column, R random matchup, Enter start
 //   Game:   Space pause, 1-5 speed (1x 2x 4x 8x 30x), N names, B box score, F finish instantly, Esc menu
+//           V 2D/3D view, C cycle 3D camera (broadcast, wide, end zone), mouse wheel zoom (3D)
 //   Final:  Enter or Esc back to menu
 //
 // Extra flags (handy for thumbnails / headless checks):
 //   nhl_sim --data DIR --home EDM --away COL --screenshot out.png --after 600   (sim seconds)
+//           --view 2d|3d|wide|end
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -17,6 +19,8 @@
 #include <vector>
 
 #include "raylib.h"
+#include "raymath.h"
+#include "rlgl.h"
 
 #include "core/Game.h"
 #include "core/League.h"
@@ -155,6 +159,11 @@ struct App {
     Color bannerColor = kText;
     std::deque<Vec2> trail;
     View view;
+    bool view3d = false;
+    int cam = 0;  // 3D camera: 0 broadcast, 1 wide, 2 end zone
+    float zoom = 1.f, endSide = 1.f;
+    bool camSnap = true;
+    Camera3D camera{};
 };
 
 void startGame(App& a) {
@@ -169,6 +178,7 @@ void startGame(App& a) {
     a.banner.clear();
     a.bannerTime = 0;
     a.trail.clear();
+    a.camSnap = true;
 }
 
 // Home wears its primary color; away wears white with primary trim, like the NHL.
@@ -203,6 +213,311 @@ void drawBodies(const App& a) {
     for (size_t k = 1; k < a.trail.size(); ++k)
         DrawLineEx(v.S(a.trail[k - 1]), v.S(a.trail[k]), 2.f, Fade(Color{20, 20, 20, 255}, float(k) / float(a.trail.size()) * 0.5f));
     DrawCircleV(v.S(pk.pos), 4.f, Color{10, 10, 10, 255});
+}
+
+// --------------------------------------------------------------- 3D view ----
+// Same game state, drawn in 3D: sim (x, y) on the ice becomes world (x, height, -y), in feet.
+// Flat things (ice, markings, shadows) are painted in order with the depth test off, which avoids
+// z-fighting at broadcast distances; everything that stands up is drawn after with depth on.
+
+const char* kCamNames[3] = {"BROADCAST", "WIDE", "END ZONE"};
+constexpr float kViewTop = 60, kViewBottom = 572;  // the strip between the top bar and the bottom panel
+constexpr float kViewMid = (kViewTop + kViewBottom) / 2, kViewHalf = (kViewBottom - kViewTop) / 2;
+
+// Like BeginMode3D, but with an off-centre frustum so the camera looks at the middle of the visible strip
+// (not the middle of the window) and fovy spans that strip.
+void beginStripMode3D(const Camera3D& cam) {
+    rlDrawRenderBatchActive();
+    rlMatrixMode(RL_PROJECTION);
+    rlPushMatrix();
+    rlLoadIdentity();
+    double px = RL_CULL_DISTANCE_NEAR * std::tan(cam.fovy * 0.5 * DEG2RAD) / kViewHalf;  // near-plane size of one pixel
+    rlFrustum(-kW / 2.0 * px, kW / 2.0 * px, -(kH - kViewMid) * px, kViewMid * px, RL_CULL_DISTANCE_NEAR, RL_CULL_DISTANCE_FAR);
+    rlMatrixMode(RL_MODELVIEW);
+    rlLoadIdentity();
+    rlMultMatrixf(MatrixToFloat(MatrixLookAt(cam.position, cam.target, cam.up)));
+    rlEnableDepthTest();
+}
+
+// World point to screen pixels under beginStripMode3D; false when it's behind the camera.
+bool stripToScreen(const Camera3D& cam, Vector3 wp, Vector2& out) {
+    Vector3 v = Vector3Transform(wp, MatrixLookAt(cam.position, cam.target, cam.up));
+    if (v.z > -0.1f) return false;
+    float k = kViewHalf / std::tan(cam.fovy * 0.5f * DEG2RAD);
+    out = {kW / 2.f + v.x / -v.z * k, kViewMid - v.y / -v.z * k};
+    return true;
+}
+
+Vector3 W(Vec2 p, float h = 0) { return {p.x, h, -p.y}; }
+
+void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Color col) {
+    DrawTriangle3D(a, b, c, col);
+    DrawTriangle3D(a, c, d, col);
+}
+
+void stripe(Vec2 a, Vec2 b, float w, Color c) {
+    Vec2 q = (b - a).norm().perp() * (w / 2);
+    quad(W(a + q), W(b + q), W(b - q), W(a - q), c);
+}
+
+void ring(Vec2 c, float r, float w, Color col, float a0 = 0, float a1 = 360, int segs = 48) {
+    for (int k = 0; k < segs; ++k) {
+        float t0 = (a0 + (a1 - a0) * k / segs) * DEG2RAD, t1 = (a0 + (a1 - a0) * (k + 1) / segs) * DEG2RAD;
+        Vec2 u0(std::cos(t0), std::sin(t0)), u1(std::cos(t1), std::sin(t1));
+        quad(W(c + u0 * (r - w)), W(c + u1 * (r - w)), W(c + u1 * r), W(c + u0 * r), col);
+    }
+}
+
+void disc(Vec2 c, float r, Color col, float a0 = 0, float a1 = 360, int segs = 24) {
+    for (int k = 0; k < segs; ++k) {
+        float t0 = (a0 + (a1 - a0) * k / segs) * DEG2RAD, t1 = (a0 + (a1 - a0) * (k + 1) / segs) * DEG2RAD;
+        DrawTriangle3D(W(c), W(c + Vec2(std::cos(t0), std::sin(t0)) * r), W(c + Vec2(std::cos(t1), std::sin(t1)) * r), col);
+    }
+}
+
+// The rink outline (rounded rectangle), pushed `out` feet outward; counter-clockwise, not closed.
+std::vector<Vec2> outline(float out, int segs = 12) {
+    using namespace rink;
+    const float ix = kHalfLength - kCornerRadius, iy = kHalfWidth - kCornerRadius, r = kCornerRadius + out;
+    const float cx[4] = {ix, -ix, -ix, ix}, cy[4] = {iy, iy, -iy, -iy};
+    std::vector<Vec2> p;
+    for (int c = 0; c < 4; ++c)
+        for (int k = 0; k <= segs; ++k) {
+            float a = (90.f * c + 90.f * k / segs) * DEG2RAD;
+            p.push_back({cx[c] + r * std::cos(a), cy[c] + r * std::sin(a)});
+        }
+    return p;
+}
+
+// A band between two outlines at given heights (a stand row's tread, a riser, the board cap).
+void band(const std::vector<Vec2>& in, const std::vector<Vec2>& out, float hIn, float hOut, Color c) {
+    for (size_t i = 0; i < in.size(); ++i) {
+        size_t j = (i + 1) % in.size();
+        quad(W(in[i], hIn), W(in[j], hIn), W(out[j], hOut), W(out[i], hOut), c);
+    }
+}
+
+void wall(const std::vector<Vec2>& line, float h0, float h1, Color c) {
+    for (size_t i = 0; i < line.size(); ++i) {
+        size_t j = (i + 1) % line.size();
+        quad(W(line[i], h0), W(line[j], h0), W(line[j], h1), W(line[i], h1), c);
+    }
+}
+
+struct Fan { Vector3 pos; Vec2 along; Color c; };
+constexpr int kRows = 12;
+constexpr float kRowDepth = 4.f, kRowRise = 2.6f, kStandGap = 3.f;
+
+const std::vector<Fan>& crowd() {
+    static std::vector<Fan> fans;
+    if (!fans.empty()) return fans;
+    static const Color shirts[] = {{200, 40, 50, 255}, {235, 235, 235, 255}, {30, 60, 140, 255}, {60, 60, 70, 255},
+                                   {240, 180, 40, 255}, {40, 120, 70, 255}, {150, 150, 160, 255}, {20, 20, 26, 255}};
+    uint32_t h = 12345;
+    for (int row = 0; row < kRows; ++row) {
+        auto line = outline(kStandGap + row * kRowDepth + kRowDepth * 0.5f, 16);
+        float height = 4.f + row * kRowRise;
+        for (size_t i = 0; i < line.size(); ++i) {
+            Vec2 a = line[i], b = line[(i + 1) % line.size()];
+            Vec2 d = b - a;
+            int n = int(d.len() / 2.4f);
+            for (int k = 0; k < n; ++k) {
+                h = h * 1664525u + 1013904223u;
+                if ((h >> 28) < 2) continue;  // empty seat
+                fans.push_back({W(a + d * ((k + 0.5f) / n), height), d.norm(), shirts[(h >> 8) % 8]});
+            }
+        }
+    }
+    return fans;
+}
+
+void drawArena(const Game* g) {
+    using namespace rink;
+    static const auto ice = outline(0);
+    // Flat pass: floor, ice, markings. Painted in order, no depth test.
+    DrawPlane({0, -0.2f, 0}, {600, 500}, Color{14, 17, 24, 255});
+    for (size_t i = 0; i < ice.size(); ++i) DrawTriangle3D(W({0, 0}), W(ice[i]), W(ice[(i + 1) % ice.size()]), kIce);
+    if (g) disc({0, 0}, 4.5f, Fade(toColor(g->team(0).info.primary), 0.35f));
+    float gy = kHalfWidth - 0.2f;
+    stripe({0, -gy}, {0, gy}, 1.f, kRed);
+    for (float sx : {-1.f, 1.f}) stripe({sx * kBlueLineX, -gy}, {sx * kBlueLineX, gy}, 1.f, kBlue);
+    float gl = (kHalfWidth - kCornerRadius) + std::sqrt(kCornerRadius * kCornerRadius - std::pow(kGoalLineX - (kHalfLength - kCornerRadius), 2.f));
+    for (float sx : {-1.f, 1.f}) stripe({sx * kGoalLineX, -gl}, {sx * kGoalLineX, gl}, 0.35f, kRed);
+    ring({0, 0}, 15.f, 0.35f, kBlue);
+    disc({0, 0}, 0.6f, kBlue);
+    for (float sx : {-1.f, 1.f}) {
+        for (float sy : {-1.f, 1.f}) {
+            ring({sx * kZoneDotX, sy * kDotY}, 15.f, 0.35f, kRed);
+            disc({sx * kZoneDotX, sy * kDotY}, 1.f, kRed);
+            disc({sx * kNeutralDotX, sy * kDotY}, 1.f, kRed);
+        }
+        float a0 = sx > 0 ? 90.f : -90.f;
+        disc({sx * kGoalLineX, 0}, kCreaseRadius, Fade(kCrease, 0.8f), a0, a0 + 180.f);
+        ring({sx * kGoalLineX, 0}, kCreaseRadius, 0.25f, kRed, a0, a0 + 180.f, 24);
+    }
+}
+
+void drawBoardsAndStands() {
+    static const auto ice = outline(0), cap = outline(0.6f);
+    wall(ice, 0, 0.7f, Color{230, 190, 60, 255});  // kick plate
+    wall(ice, 0.7f, 3.3f, Color{246, 246, 242, 255});
+    wall(ice, 3.3f, 3.5f, Color{60, 66, 78, 255});
+    band(ice, cap, 3.5f, 3.5f, Color{70, 76, 90, 255});
+    wall(cap, 0, 3.5f, Color{40, 44, 54, 255});
+    // Stands: stepped rows rising away from the glass.
+    float h = 0;
+    for (int row = 0; row < kRows; ++row) {
+        auto in = outline(kStandGap + row * kRowDepth, 16), out = outline(kStandGap + (row + 1) * kRowDepth, 16);
+        float top = 4.f + row * kRowRise;
+        wall(in, h, top, Color{30, 34, 44, 255});
+        band(in, out, top, top, row % 2 ? Color{44, 50, 64, 255} : Color{52, 58, 74, 255});
+        h = top;
+    }
+    for (const Fan& f : crowd()) {
+        Vec2 s = f.along * 0.5f;
+        Vector3 b0{f.pos.x - s.x, f.pos.y, f.pos.z + s.y}, b1{f.pos.x + s.x, f.pos.y, f.pos.z - s.y};
+        quad(b0, b1, {b1.x, b1.y + 1.6f, b1.z}, {b0.x, b0.y + 1.6f, b0.z}, f.c);
+        DrawCube({f.pos.x, f.pos.y + 2.0f, f.pos.z}, 0.6f, 0.6f, 0.6f, Color{214, 170, 140, 255});
+    }
+}
+
+void drawGlass() {
+    static const auto ice = outline(0);
+    wall(ice, 3.5f, 8.5f, Color{190, 225, 245, 38});
+}
+
+void drawNets() {
+    using namespace rink;
+    const Color post = kRed, mesh = Color{245, 245, 245, 150};
+    for (float sx : {-1.f, 1.f}) {
+        float gx = sx * kGoalLineX, bx = sx * (kGoalLineX + kNetDepth);
+        float y = kNetHalfWidth, h = 4.f;
+        DrawCylinderEx(W({gx, y}), W({gx, y}, h), 0.15f, 0.15f, 8, post);
+        DrawCylinderEx(W({gx, -y}), W({gx, -y}, h), 0.15f, 0.15f, 8, post);
+        DrawCylinderEx(W({gx, y}, h), W({gx, -y}, h), 0.15f, 0.15f, 8, post);
+        DrawCylinderEx(W({gx, y}), W({bx, y}), 0.1f, 0.1f, 6, post);
+        DrawCylinderEx(W({gx, -y}), W({bx, -y}), 0.1f, 0.1f, 6, post);
+        DrawCylinderEx(W({bx, y}), W({bx, -y}), 0.1f, 0.1f, 6, post);
+        // Mesh: back, sides and roof sloping down from the crossbar.
+        quad(W({bx, y}), W({bx, -y}), W({bx, -y}, 1.2f), W({bx, y}, 1.2f), mesh);
+        quad(W({bx, y}, 1.2f), W({bx, -y}, 1.2f), W({gx, -y}, h), W({gx, y}, h), mesh);
+        for (float sy : {-1.f, 1.f}) {
+            DrawTriangle3D(W({gx, sy * y}), W({bx, sy * y}), W({gx, sy * y}, h), mesh);
+            DrawTriangle3D(W({bx, sy * y}), W({bx, sy * y}, 1.2f), W({gx, sy * y}, h), mesh);
+        }
+    }
+}
+
+Color shade(Color c, float f) { return Color{(unsigned char)(c.r * f), (unsigned char)(c.g * f), (unsigned char)(c.b * f), c.a}; }
+
+void drawPlayer3D(const Game& g, const Body& b) {
+    Color fill = jerseyFill(g, b.team), trim = jerseyTrim(g, b.team);
+    Color pants = shade(toColor(g.team(b.team).info.primary), 0.5f);
+    Vec2 f = b.face.len() > 0.1f ? b.face.norm() : Vec2(1, 0), s = f.perp();
+    Vec2 p = b.pos;
+    if (b.isGoalie()) {
+        for (float k : {-1.f, 1.f}) DrawCylinderEx(W(p + s * (k * 0.75f), 0.1f), W(p + s * (k * 0.75f) + f * 0.2f, 2.3f), 0.55f, 0.5f, 8, Color{236, 236, 230, 255});
+        DrawCylinderEx(W(p, 2.0f), W(p, 4.1f), 1.25f, 1.35f, 12, fill);
+        DrawCylinderEx(W(p, 3.0f), W(p, 3.35f), 1.33f, 1.37f, 12, trim);
+        DrawSphere(W(p + f * 0.15f, 4.75f), 0.62f, Color{236, 236, 230, 255});
+        DrawSphere(W(p + f * 0.35f, 4.75f), 0.45f, trim);
+        DrawCube(W(p + f * 0.9f + s * 1.5f, 2.9f), 0.5f, 1.4f, 0.5f, Color{236, 236, 230, 255});  // blocker
+        DrawSphere(W(p - s * 1.4f + f * 0.6f, 3.0f), 0.65f, trim);  // catcher
+        DrawCylinderEx(W(p + f * 0.9f, 2.6f), W(p + f * 2.2f, 0.15f), 0.07f, 0.07f, 4, Color{30, 30, 30, 255});
+        DrawCylinderEx(W(p + f * 2.2f - s * 0.6f, 0.15f), W(p + f * 2.2f + s * 0.6f, 0.15f), 0.14f, 0.14f, 4, Color{30, 30, 30, 255});
+        return;
+    }
+    for (float k : {-1.f, 1.f}) DrawCylinderEx(W(p + s * (k * 0.38f), 0.1f), W(p + s * (k * 0.32f), 2.6f), 0.32f, 0.36f, 8, pants);
+    DrawCylinderEx(W(p, 2.4f), W(p, 4.5f), 0.85f, 1.0f, 12, fill);
+    DrawCylinderEx(W(p, 3.15f), W(p, 3.45f), 0.93f, 0.97f, 12, trim);
+    DrawSphere(W(p, 4.55f), 1.0f, fill);
+    DrawSphere(W(p, 5.65f), 0.5f, trim);
+    // Stick from the hands down to the blade on the ice.
+    Vec2 hands = p + f * 0.9f + s * 0.4f, heel = p + f * 2.2f;
+    DrawCylinderEx(W(hands, 3.3f), W(heel, 0.15f), 0.07f, 0.07f, 4, Color{35, 30, 28, 255});
+    DrawCylinderEx(W(heel, 0.15f), W(heel - s * 0.8f, 0.15f), 0.1f, 0.1f, 4, Color{35, 30, 28, 255});
+}
+
+void draw3D(const App& a) {
+    const Game& g = *a.game;
+    const Puck& pk = g.puck();
+    beginStripMode3D(a.camera);
+    rlDrawRenderBatchActive();
+    rlDisableBackfaceCulling();
+    rlDisableDepthTest();
+    drawArena(&g);
+    for (size_t k = 1; k < a.trail.size(); ++k)
+        stripe(a.trail[k - 1], a.trail[k], 0.3f, Fade(Color{20, 20, 20, 255}, float(k) / float(a.trail.size()) * 0.45f));
+    for (int i = 0; i < 12; ++i) {
+        const Body& b = g.bodies()[size_t(i)];
+        if (!b.active) continue;
+        disc(b.pos + Vec2(0.5f, -0.4f), b.isGoalie() ? 1.9f : 1.5f, Color{0, 0, 0, 50}, 0, 360, 16);
+        if (pk.carrier == i) ring(b.pos, 2.4f, 0.35f, Fade(kGold, 0.85f), 0, 360, 24);
+        if (b.stun > 0) ring(b.pos, 2.0f, 0.3f, Fade(kRed, 0.8f), 0, 360, 24);
+    }
+    disc(pk.pos + Vec2(0.15f, -0.1f), 0.5f, Color{0, 0, 0, 60}, 0, 360, 10);
+    rlDrawRenderBatchActive();
+    rlEnableDepthTest();
+    drawBoardsAndStands();
+    drawNets();
+    for (int i = 0; i < 12; ++i)
+        if (g.bodies()[size_t(i)].active) drawPlayer3D(g, g.bodies()[size_t(i)]);
+    // The puck is drawn oversized (a real one is 3 in across) so it reads from the stands.
+    DrawCylinder(W(pk.pos, 0.02f), 0.45f, 0.45f, 0.22f, 12, Color{12, 12, 12, 255});
+    drawGlass();
+    rlDrawRenderBatchActive();
+    rlEnableBackfaceCulling();
+    EndMode3D();
+
+    if (a.names) {
+        for (int i = 0; i < 12; ++i) {
+            const Body& b = g.bodies()[size_t(i)];
+            Vector2 sp;
+            if (!b.active || !stripToScreen(a.camera, W(b.pos, b.isGoalie() ? 6.0f : 6.8f), sp)) continue;
+            if (sp.y < kViewTop + 10 || sp.y > kViewBottom - 6 || sp.x < 0 || sp.x > kW) continue;
+            std::string n = lastName(g.player(b.team, b.roster).name);
+            int w = MeasureText(n.c_str(), 10);
+            DrawRectangle(int(sp.x) - w / 2 - 2, int(sp.y) - 12, w + 4, 12, Fade(kBg, 0.55f));
+            textCenter(n, sp.x, sp.y - 11, 10, kText);
+        }
+    }
+    std::string cam = std::string(kCamNames[a.cam]) + " CAM";
+    DrawRectangle(10, 66, MeasureText(cam.c_str(), 10) + 12, 16, Fade(kBg, 0.75f));
+    text(cam, 16, 69, 10, kDim);
+}
+
+// Eases the camera toward where the current mode wants it; snap jumps straight there.
+void updateCamera(App& a, float dt, bool snap) {
+    const Game& g = *a.game;
+    Vec2 p = g.puck().pos;
+    Vector3 pos, tgt;
+    switch (a.cam) {
+        case 0: {  // broadcast: high in the stands on the near side, following the play along the boards
+            float x = std::clamp(p.x * 0.85f, -58.f, 58.f);
+            tgt = {x, 0, std::clamp(-p.y * 0.25f, -6.f, 6.f) + 3.f};
+            pos = {x, 66.f, tgt.z + 108.f};
+            break;
+        }
+        case 1:  // wide: the whole rink from above center
+            tgt = {0, 0, 6.f};
+            pos = {0, 150.f, 112.f};
+            break;
+        default: {  // end zone: above the glass behind the net at the end where the puck is
+            if (p.x * a.endSide < -30.f) a.endSide = -a.endSide;
+            float s = a.endSide;
+            tgt = {s * 58.f, 0, -p.y * 0.4f};
+            pos = {s * 136.f, 44.f, -p.y * 0.15f};
+            break;
+        }
+    }
+    pos = {tgt.x + (pos.x - tgt.x) * a.zoom, tgt.y + (pos.y - tgt.y) * a.zoom, tgt.z + (pos.z - tgt.z) * a.zoom};
+    float k = snap ? 1.f : 1.f - std::exp(-dt * 2.5f);
+    auto ease = [k](Vector3& v, Vector3 to) { v = {v.x + (to.x - v.x) * k, v.y + (to.y - v.y) * k, v.z + (to.z - v.z) * k}; };
+    ease(a.camera.position, pos);
+    ease(a.camera.target, tgt);
+    a.camera.up = {0, 1, 0};
+    a.camera.fovy = 26.f;  // across the visible strip
+    a.camera.projection = CAMERA_PERSPECTIVE;
 }
 
 void drawTopBar(const App& a) {
@@ -287,7 +602,7 @@ void drawBottom(const App& a) {
     // Event feed.
     float fx = 650;
     text("Game log", fx, y0 + 10, 16, kText);
-    textRight("Space pause  1-5 speed  N names  B box  F finish  Esc menu", kW - 16, y0 + 12, 10, kDim);
+    textRight("Space pause  1-5 speed  N names  B box  F finish  V 2D/3D  C camera  Esc menu", kW - 16, y0 + 12, 10, kDim);
     std::vector<const GameEvent*> shown;
     for (auto it = g.events().rbegin(); it != g.events().rend() && shown.size() < 7; ++it) {
         EventType t = it->type;
@@ -438,6 +753,9 @@ void updateGame(App& a, float dt) {
     if (IsKeyPressed(KEY_B)) a.showBox = !a.showBox;
     if (IsKeyPressed(KEY_F)) g.playToEnd();
     if (IsKeyPressed(KEY_ESCAPE)) { a.screen = Screen::Menu; return; }
+    if (IsKeyPressed(KEY_V)) { a.view3d = !a.view3d; a.camSnap = true; }
+    if (IsKeyPressed(KEY_C)) a.cam = (a.cam + 1) % 3;
+    if (a.view3d) a.zoom = std::clamp(a.zoom * (1.f - 0.1f * GetMouseWheelMove()), 0.5f, 1.8f);
 
     if (!a.paused) g.advance(std::min(dt, 0.05f) * a.speed);
 
@@ -454,13 +772,15 @@ void updateGame(App& a, float dt) {
     else a.trail.clear();
     while (a.trail.size() > 14) a.trail.pop_front();
 
+    if (a.view3d) { updateCamera(a, dt, a.camSnap); a.camSnap = false; }
+
     if (g.finished() && a.bannerTime <= 0) a.screen = Screen::Final;
 }
 
 void drawGame(const App& a) {
     ClearBackground(kBg);
-    drawRink(a.view, a.game.get());
-    drawBodies(a);
+    if (a.view3d) draw3D(a);
+    else { drawRink(a.view, a.game.get()); drawBodies(a); }
     drawTopBar(a);
     drawBottom(a);
     const Game& g = *a.game;
@@ -483,7 +803,7 @@ void drawGame(const App& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string dataDir = "data", shot, home, away;
+    std::string dataDir = "data", shot, home, away, view = "2d";
     float after = 0;
     for (int i = 1; i + 1 < argc; ++i) {
         std::string k = argv[i];
@@ -492,6 +812,7 @@ int main(int argc, char** argv) {
         else if (k == "--after") after = float(std::atof(argv[++i]));
         else if (k == "--home") home = argv[++i];
         else if (k == "--away") away = argv[++i];
+        else if (k == "--view") view = argv[++i];
     }
 
     // Find the stats: --data, ./data, or data/ next to the executable (one or two levels up for IDE builds).
@@ -516,6 +837,9 @@ int main(int argc, char** argv) {
         startGame(a);
         a.game->advance(after);
         a.speed = 4.f;
+        a.view3d = view != "2d";
+        a.cam = view == "wide" ? 1 : view == "end" ? 2 : 0;
+        if (a.view3d) updateCamera(a, 0, true);
         if (a.game->finished()) a.screen = Screen::Final;
         for (int f = 0; f < 2; ++f) {
             BeginDrawing();
