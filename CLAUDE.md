@@ -24,6 +24,8 @@ There is no unit-test suite or linter. Verification is done with the headless ru
 ./build/headless_sim data --season        # 41-home-game schedule + standings (~10 min)
 ```
 
+CI (`.github/workflows/ci.yml`) runs `headless_sim data 100 --check` (fails if league averages leave broad sanity ranges), builds the viewer on Linux/macOS/Windows, and renders a viewer screenshot under xvfb on Linux (uploaded as an artifact). If a deliberate tuning change moves averages outside the `--check` ranges, widen them in `tools/headless_sim.cpp`.
+
 - Batch games use fixed seeds (`i * 7919 + 17`), so calibration output is reproducible for a given code + data state. Re-run calibration after any gameplay change and compare with the README table.
 - Define `HK_DIAG` (e.g. `-DCMAKE_CXX_FLAGS=-DHK_DIAG`) to collect shot-quality/goalie-positioning diagnostics (`g_diag` in `Game.cpp`), printed by headless_sim.
 - Viewer screenshot mode for checking rendering without interaction: `./build/nhl_sim --data data --home EDM --away COL --screenshot out.png --after 600` (600 sim seconds).
