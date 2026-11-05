@@ -1,12 +1,12 @@
 # NHL Sim — C++ hockey simulation engine
 
-A watchable top-down 2D NHL game. Every skater and goalie is rated from current
+A watchable NHL game, in top-down 2D or a 3D arena view. Every skater and goalie is rated from current
 (2026-27) box-score stats; the match itself is a real-time physics and AI simulation,
 not a dice roll on the final score. C++17, CMake, raylib. Builds on macOS and Windows.
 
 ```
 src/core/      simulation engine (no graphics): ratings, rink physics, AI, rules, stats
-src/viewer/    raylib front end: team picker, live rink view, box score
+src/viewer/    raylib front end: team picker, live rink view (2D or 3D), box score
 tools/         headless_sim (batch games + calibration), fetch_nhl_stats.py (data refresh)
 data/          players.csv (+ goalies.csv after you run the fetcher)
 ```
@@ -31,6 +31,7 @@ folder is copied next to the executable after each build.
 | --- | --- |
 | Menu | Up/Down pick a team, Left/Right switch Away/Home, `R` random matchup, Enter start (mouse works too) |
 | Game | Space pause, `1`–`5` speed (1x 2x 4x 8x 30x), `N` names, `B` box score, `F` finish instantly, Esc menu |
+| 3D view | `V` switch 2D/3D, `C` cycle camera (broadcast, wide, end zone), mouse wheel zoom |
 | Final | Enter for a new game |
 
 ## Getting full, current rosters
