@@ -41,13 +41,22 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release -j
-      - name: Render a screenshot on a virtual display
+      - name: Render screenshots on a virtual display (2D and each 3D camera)
+        if: runner.os == 'Linux'
+        run: |
+          for v in 2d 3d wide end; do
+            xvfb-run -a -s "-screen 0 1600x1000x24" \
+              ./build/nhl_sim --data data --home EDM --away COL --screenshot shot-$v.png --after 600 --view $v
+            test -s shot-$v.png
+          done
+      - name: Scripted live game (V, C, zoom, names, 30x, back to 2D)
         if: runner.os == 'Linux'
         run: |
           xvfb-run -a -s "-screen 0 1600x1000x24" \
-            ./build/nhl_sim --data data --home EDM --away COL --screenshot shot-2d.png --after 600
-          test -s shot-2d.png
-      - name: Upload screenshot
+            ./build/nhl_sim --data data --home EDM --away COL --script-out shot-live \
+            --script "1:v,1.5:shot,2:c,3:shot,3.5:c,4.5:shot,5:c,5.1:z+5,6:shot,6.5:n,6.6:s5,8:shot,8.5:v,9:shot,9.5:quit"
+          for i in 1 2 3 4 5 6; do test -s shot-live_$i.png; done
+      - name: Upload screenshots
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v7
         with:

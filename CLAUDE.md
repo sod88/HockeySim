@@ -24,11 +24,11 @@ There is no unit-test suite or linter. Verification is done with the headless ru
 ./build/headless_sim data --season        # 41-home-game schedule + standings (~10 min)
 ```
 
-CI (`.github/workflows/ci.yml`) runs `headless_sim data 100 --check` (fails if league averages leave broad sanity ranges), builds the viewer on Linux/macOS/Windows, and renders a viewer screenshot under xvfb on Linux (uploaded as an artifact). If a deliberate tuning change moves averages outside the `--check` ranges, widen them in `tools/headless_sim.cpp`.
+CI (`.github/workflows/ci.yml`) runs `headless_sim data 100 --check` (fails if league averages leave broad sanity ranges), builds the viewer on Linux/macOS/Windows, and on Linux renders 2D/3D screenshots plus a `--script` live game under xvfb (uploaded as an artifact). If a deliberate tuning change moves averages outside the `--check` ranges, widen them in `tools/headless_sim.cpp`.
 
 - Batch games use fixed seeds (`i * 7919 + 17`), so calibration output is reproducible for a given code + data state. Re-run calibration after any gameplay change and compare with the README table.
 - Define `HK_DIAG` (e.g. `-DCMAKE_CXX_FLAGS=-DHK_DIAG`) to collect shot-quality/goalie-positioning diagnostics (`g_diag` in `Game.cpp`), printed by headless_sim.
-- Viewer screenshot mode for checking rendering without interaction: `./build/nhl_sim --data data --home EDM --away COL --screenshot out.png --after 600` (600 sim seconds); add `--view 3d|wide|end` to capture a 3D camera.
+- Viewer screenshot mode for checking rendering without interaction: `./build/nhl_sim --data data --home EDM --away COL --screenshot out.png --after 600` (600 sim seconds); add `--view 3d|wide|end` to capture a 3D camera. `--script "2:v,4:shot,5:c,...,12:quit"` plays a live game and fires keyboard actions at wall-clock seconds (v, c, n, z±N, s1–s5, shot, quit), saving `<--script-out>_<k>.png` and logging camera state/FPS; use it to test interactive viewer changes.
 - `python3 tools/fetch_nhl_stats.py` refreshes `data/players.csv` and writes `data/goalies.csv` from the unofficial public NHL APIs (stdlib only). The `data/` folder is copied next to `nhl_sim` on every build.
 
 ## Architecture
