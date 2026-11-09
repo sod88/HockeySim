@@ -306,6 +306,22 @@ void buildLines(Team& t, Rng& rng) {
     t.defense = dfn;
     t.goaltending = P[t.lines.goalies[0]].gr.overall;
     t.overall = 0.4f * t.offense + 0.3f * t.defense + 0.3f * t.goaltending;
+
+    // Raw style index (skill minus physicality); loadLeague spreads it across the league.
+    float skill = 0, phys = 0;
+    for (int l = 0; l < 4; ++l)
+        for (int s = 0; s < 3; ++s) {
+            const auto& r = P[t.lines.fwd[l][s]].r;
+            skill += fw[l] / 3.f * (0.4f * r.handling + 0.35f * r.passing + 0.25f * r.skating);
+            phys += fw[l] / 3.f * r.checking;
+        }
+    for (int d = 0; d < 3; ++d)
+        for (int s = 0; s < 2; ++s) {
+            const auto& r = P[t.lines.def[d][s]].r;
+            skill += dw[d] / 2.f * (0.5f * r.passing + 0.3f * r.handling + 0.2f * r.skating);
+            phys += dw[d] / 2.f * r.checking;
+        }
+    t.style = 0.5f * skill - 0.25f * phys;  // both sums are weighted twice (forwards + D)
 }
 
 }  // namespace
@@ -362,6 +378,15 @@ League loadLeague(const std::string& dataDir, uint64_t seed) {
         t.realPlayers = int(t.players.size());
         buildLines(t, rng);
         for (const auto& p : t.players) generated += p.generated ? 1 : 0;
+    }
+    // Spread the raw style index to 0.15-0.85 by z-score, so every league has both kinds of team.
+    {
+        double m = 0, v = 0;
+        for (const auto& t : L.teams) m += t.style;
+        m /= double(L.teams.size());
+        for (const auto& t : L.teams) v += (t.style - m) * (t.style - m);
+        float sd = float(std::sqrt(v / double(L.teams.size())));
+        for (auto& t : L.teams) t.style = std::clamp(0.5f + 0.17f * (t.style - float(m)) / std::max(sd, 0.01f), 0.15f, 0.85f);
     }
 
     std::ostringstream os;

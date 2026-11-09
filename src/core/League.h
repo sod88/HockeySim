@@ -70,6 +70,9 @@ struct Team {
     std::vector<Player> players;
     Lineup lines;
     float offense = 70, defense = 70, goaltending = 70, overall = 70;
+    // Playing style, 0 = dump-and-chase / heavy forecheck, 1 = puck possession (controlled entries, more passing).
+    // From the ice-time weighted skill (handling, passing, skating) vs physical (checking) mix, spread across the league.
+    float style = 0.5f;
     int realPlayers = 0;  // players that came from the stats files
 };
 

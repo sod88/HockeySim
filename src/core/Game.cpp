@@ -18,13 +18,13 @@ constexpr float kPuckR = 0.25f;
 
 // Calibration knobs. tools/headless_sim checks league-wide output against NHL averages.
 namespace tune {
-constexpr float shootUrge = 0.035f;    // per carrier decision, scaled by shot quality and shot rate
-constexpr float goalScale = 0.65f;     // multiplies P(goal | on net)
-constexpr float hitRate = 0.088f;      // per second while an opponent is within reach of the carrier
+constexpr float shootUrge = 0.024f;    // per carrier decision, scaled by shot quality and shot rate
+constexpr float goalScale = 0.61f;     // multiplies P(goal | on net)
+constexpr float hitRate = 0.076f;      // per second while an opponent is within reach of the carrier
 constexpr float pokeRate = 0.22f;      // stick checks per second, same condition
-constexpr float blockChance = 0.65f;   // when a shot passes within reach of a defender
-constexpr float penaltyOnHit = 0.048f;
-constexpr float penaltyOnPoke = 0.022f;
+constexpr float blockChance = 0.78f;   // when a shot passes within reach of a defender
+constexpr float penaltyOnHit = 0.046f;
+constexpr float penaltyOnPoke = 0.020f;
 }  // namespace tune
 
 const float kFShift[4] = {56.f, 48.f, 38.f, 28.f};  // forward line shift lengths (s): top lines play more
@@ -335,6 +335,8 @@ void Game::resolveFaceoff() {
     puck_.vel = rotate((aim - faceoffDot_).norm(), rng_.normal(0, 0.25f)) * rng_.range(14.f, 22.f);
     puck_.lastTeam = w;
     puck_.passTarget = best;
+    puck_.passFrom = faceoffDot_;
+    puck_.passAim = aim;
     ca.ignorePuck = cb.ignorePuck = 0.25f;
     phase_ = Phase::Play;
 }
@@ -445,6 +447,7 @@ void Game::tick(float h) {
     moveBodies(h);
     updatePuck(h);
     if (phase_ != Phase::Play) return;
+    trackEntries();
     puckControl(h);
     if (phase_ != Phase::Play) return;
     pressure(h);
@@ -605,6 +608,7 @@ void Game::teamAI(int side, float h) {
         return;
     }
 
+    float aggr = tactics(side).aggression;
     // Loose puck: one chaser (the intended receiver if it's our pass), the rest hold structure.
     int chaser = -1;
     if (puck_.passTarget >= 0 && bodies_[puck_.passTarget].team == side && bodies_[puck_.passTarget].active) {
@@ -616,6 +620,8 @@ void Game::teamAI(int side, float h) {
             const Body& b = bodies_[side * 6 + slot];
             if (!b.active || b.stun > 0) continue;
             float d = dist(b.pos, pred) - (b.ignorePuck > 0 ? 0.f : 0.5f);
+            // Defensemen only pinch deep for a loose puck when the plan calls for it.
+            if (slot >= 3 && pred.x * float(tg_[side].dir) > 45.f) d += 16.f * (1.f - aggr);
             if (d < best) { best = d; chaser = side * 6 + slot; }
         }
     }
@@ -628,6 +634,11 @@ void Game::teamAI(int side, float h) {
             tt = std::min(tt, 1.2f);
             t = puck_.pos + puck_.vel * tt;
             if (dist(c.pos, t) > dist(c.pos, puck_.pos)) t = puck_.pos + puck_.vel * 0.25f;
+            // A led pass: keep skating onto the spot it was aimed at rather than stopping to reach back for it.
+            if (chaser == puck_.passTarget && dot(puck_.passAim - puck_.pos, puck_.vel) > 0 && dist(puck_.passAim, puck_.passFrom) > 1.f) {
+                Vec2 dirp = puck_.vel.norm();
+                t = puck_.pos + dirp * dot(puck_.passAim - puck_.pos, dirp);
+            }
         } else {
             t = puck_.pos;
         }
@@ -645,6 +656,7 @@ void Game::teamAI(int side, float h) {
 
 void Game::offenseTargets(int side, Vec2 P, int skip) {
     float s = float(tg_[side].dir);
+    Tactics tc = tactics(side);
     float px = P.x * s;
     std::vector<int> fw, dm;
     for (int slot = 0; slot < 5; ++slot) {
@@ -661,6 +673,11 @@ void Game::offenseTargets(int side, Vec2 P, int skip) {
         Vec2 lowStrong(s * 80.f, strong * 23.f), weakCircle(s * 70.f, -strong * 19.f);
         std::vector<Vec2> spots = carrierIsF ? std::vector<Vec2>{netFront, weakCircle, slotHigh}
                                              : std::vector<Vec2>{netFront, lowStrong, slotHigh};
+        // Cycle support: with a forward down low on the wall, the high man comes to the strong-side half-wall
+        // as an outlet instead of waiting in the slot.
+        if (carrierIsF && px > 74.f && std::fabs(P.y) > 16.f) spots[2] = Vec2(s * 62.f, strong * 31.f);
+        // Chasing the game: the weak-side forward crashes the back door.
+        if (tc.chase > 0.3f) spots[1] = Vec2(s * 82.f, -strong * 9.f);
         std::vector<char> taken(fw.size(), 0);
         for (const Vec2& sp : spots) {
             int bi = -1;
@@ -677,7 +694,8 @@ void Game::offenseTargets(int side, Vec2 P, int skip) {
         for (int i : dm) {
             Body& b = bodies_[i];
             float lane = b.slot == 3 ? s : -s;
-            Vec2 pt(s * 31.f, lane * (lane == strong ? 20.f : 14.f));
+            // Points hold the line; they creep in when chasing a goal and back off when protecting one.
+            Vec2 pt(s * (31.f + 9.f * tc.chase - 3.f * tc.protect), lane * (lane == strong ? 20.f : 14.f));
             if (dm.size() == 1 || carrierIsD) pt.y = carrierIsD ? -strong * 6.f : strong * 6.f;
             b.target = pt + Vec2(0, wob(b) * 0.6f);
             b.urgency = 0.7f;
@@ -703,6 +721,7 @@ void Game::offenseTargets(int side, Vec2 P, int skip) {
 
 void Game::defenseTargets(int side, int carrier, int chaser) {
     float s = float(tg_[side].dir);
+    Tactics tc = tactics(side);
     Vec2 own = ownNet(side);
     std::vector<int> mine;
     for (int slot = 0; slot < 5; ++slot) {
@@ -714,18 +733,37 @@ void Game::defenseTargets(int side, int carrier, int chaser) {
         auto it = std::min_element(mine.begin(), mine.end(), [&](int a, int b) { return dist(bodies_[a].pos, c.pos) < dist(bodies_[b].pos, c.pos); });
         if (it != mine.end()) {
             Body& p = bodies_[*it];
-            p.target = c.pos + (own - c.pos).norm() * 2.0f + c.vel * 0.15f;
+            // Gap control: a checker who is goal-side of a rush backs off through the neutral zone and
+            // stands the carrier up at our blue line, instead of charging him at centre ice.
+            float cx = c.pos.x * s, gap = 2.f;
+            if ((p.pos.x - c.pos.x) * s < 0 && cx > -rink::kBlueLineX && cx < 35.f)
+                gap = lerp(2.f, (p.slot >= 3 ? 9.f : 5.f) * (1.3f - 0.6f * tc.aggression), clamp01((cx + rink::kBlueLineX) / 35.f));
+            p.target = c.pos + (own - c.pos).norm() * gap + c.vel * 0.15f;
             p.urgency = 1.f;
             mine.erase(it);
         }
     }
+    float puckX = puck_.pos.x * s;
+    // Forecheck: with the puck deep in their end a second forward supports the first; how many go, and how far the
+    // rest follow, depends on the game plan (a team protecting a lead sits back in the neutral zone).
+    if (puckX > rink::kBlueLineX && tc.aggression >= 0.45f) {
+        int f2 = -1;
+        for (int i : mine)
+            if (bodies_[i].slot < 3 && (f2 < 0 || dist(bodies_[i].pos, puck_.pos) < dist(bodies_[f2].pos, puck_.pos))) f2 = i;
+        if (f2 >= 0) {
+            Body& m = bodies_[f2];
+            m.target = puck_.pos + Vec2(-s * 12.f, (puck_.pos.y >= 0 ? 1.f : -1.f) * (std::fabs(puck_.pos.y) > 20.f ? -8.f : 8.f));
+            m.urgency = 0.95f;
+            mine.erase(std::find(mine.begin(), mine.end(), f2));
+        }
+    }
+    float fCap = 12.f + 70.f * tc.aggression, dCap = 27.f + 30.f * std::max(0.f, tc.aggression - 0.5f);
     std::vector<int> opps;
     for (int slot = 0; slot < 5; ++slot) {
         int i = (1 - side) * 6 + slot;
         if (bodies_[i].active && i != carrier) opps.push_back(i);
     }
     std::sort(opps.begin(), opps.end(), [&](int a, int b) { return dist(bodies_[a].pos, own) < dist(bodies_[b].pos, own); });
-    float puckX = puck_.pos.x * s;
     for (int oi : opps) {
         if (mine.empty()) break;
         const Body& o = bodies_[oi];
@@ -735,8 +773,10 @@ void Game::defenseTargets(int side, int carrier, int chaser) {
         Vec2 toNet = own - o.pos;
         Vec2 t = o.pos + toNet.norm() * std::clamp(toNet.len() * 0.15f, 1.6f, 6.f);
         if (m.slot >= 3) {  // defensemen stay goal-side of the puck
-            float maxX = std::max(puckX - 6.f, -86.f);
+            float maxX = std::min(std::max(puckX - 6.f, -86.f), dCap);
             if (t.x * s > maxX) t.x = maxX * s;
+        } else if (t.x * s > fCap) {
+            t.x = fCap * s;
         }
         m.target = t;
         m.urgency = o.pos.x * s < -rink::kBlueLineX ? 1.f : 0.85f;
@@ -747,17 +787,78 @@ void Game::defenseTargets(int side, int carrier, int chaser) {
     }
 }
 
+Game::Tactics Game::tactics(int side) const {
+    Tactics t;
+    t.style = team(side).style;
+    t.pp = skatersFor(side) > skatersFor(1 - side);
+    t.pk = skatersFor(side) < skatersFor(1 - side);
+    int diff = tg_[side].score - tg_[1 - side].score;
+    // Third period only, ramping up over the last ten minutes; overtime is sudden death for both sides.
+    float late = period_ == 3 ? clamp01(1.f - clock_ / 600.f) : 0.f;
+    if (diff > 0) t.protect = late * (diff == 1 ? 1.f : diff == 2 ? 0.6f : 0.2f);
+    if (diff < 0) t.chase = std::max(late * (diff == -1 ? 1.f : diff == -2 ? 0.8f : 0.3f), period_ == 3 && diff >= -2 ? 0.2f * float(-diff) : 0.f);
+    t.aggression = clamp01(0.5f + 0.3f * (0.5f - t.style) + 0.45f * t.chase - 0.45f * t.protect + (t.pp ? 0.1f : 0.f) - (t.pk ? 0.35f : 0.f));
+    return t;
+}
+
+std::string Game::planLabel(int side) const {
+    if (phase_ == Phase::Final || period_ == 0) return "";
+    Tactics t = tactics(side);
+    if (t.pk) return "Penalty kill";
+    if (t.pp) return "Power play";
+    if (t.protect > 0.3f) return "Protect lead";
+    if (t.chase > 0.3f) return "Pressing";
+    if (t.style >= 0.6f) return "Possession";
+    if (t.style <= 0.4f) return "Dump & chase";
+    return "Balanced";
+}
+
+float Game::laneSpace(int side, Vec2 a, Vec2 b) const {
+    float best = 99.f;
+    for (int slot = 0; slot < 5; ++slot) {
+        const Body& o = bodies_[(1 - side) * 6 + slot];
+        if (o.active) best = std::min(best, distToSegment(o.pos, a, b));
+    }
+    return best;
+}
+
+// The deep corner our forwards can win: compare the race for each side and add a little doubt.
+Vec2 Game::dumpTarget(int side, Vec2 from) const {
+    float s = float(tg_[side].dir);
+    Vec2 best;
+    float bestV = -1e9f;
+    for (float ys : {1.f, -1.f}) {
+        Vec2 c(s * 92.f, ys * 30.f);
+        float ours = 1e9f, theirs = 1e9f;
+        for (int slot = 0; slot < 5; ++slot) {
+            const Body& a = bodies_[side * 6 + slot];
+            const Body& d = bodies_[(1 - side) * 6 + slot];
+            if (a.active && dist(a.pos, from) > 3.f) ours = std::min(ours, dist(a.pos, c));
+            if (d.active) theirs = std::min(theirs, dist(d.pos, c));
+        }
+        // Rimming it hard around to the far side is the safer play, but the near corner is quicker to get to.
+        float v = theirs - ours + (std::fabs(c.y - from.y) > 30.f ? 3.f : 0.f);
+        if (v > bestV) { bestV = v; best = c; }
+    }
+    return best;
+}
+
 void Game::carrierThink(Body& b) {
     int side = b.team;
     int bi = int(&b - &bodies_[0]);
     float s = float(tg_[side].dir);
     const Player& P = pl(b);
+    const TeamGame& T = tg_[side];
     Vec2 net = attackNet(side);
     float px = b.pos.x * s;
     int presser = -1;
     float pressureD = nearestOpponent(side, b.pos, &presser);
     bool inOZ = px > rink::kBlueLineX, inDZ = px < -rink::kBlueLineX;
     b.think = rng_.range(0.14f, 0.26f);
+    Tactics tc = tactics(side);
+    float skill = 0.5f * n01(P.r.handling) + 0.3f * n01(P.r.passing) + 0.2f * n01(P.r.skating);
+    // Decision noise: skilled players read the play better.
+    float sd = 0.23f - 0.08f * skill;
 
     // Shoot?
     float q = baseShotQuality(side, b.pos);
@@ -767,70 +868,23 @@ void Game::carrierThink(Body& b) {
         if (time_ < b.oneTimerUntil) urge *= 1.8f;
         if (time_ - tg_[1 - side].lastSave < 2.f) urge *= 2.f;
         if (b.slot >= 3 && dist(b.pos, net) > 40.f) urge *= 1.6f;  // point shots
-        if (skatersFor(side) > skatersFor(1 - side)) urge *= 1.3f;
+        if (tc.pp) urge *= 1.3f;
+        if (period_ > 3) urge *= 1.5f;                              // 3-on-3 overtime is all chances
+        urge *= 1.f + 0.4f * tc.chase;                              // trailing late: get pucks to the net
+        if (q < 0.06f) urge *= 1.f - 0.35f * tc.protect;            // leading late: no low-percentage shots that start a rush
         if (rng_.chance(std::min(urge, 0.85f))) { shoot(b); return; }
     }
 
-    // Pass?
-    float myVal = (inOZ ? q * 9.f : 0.f) + 0.025f * std::min(pressureD, 15.f) + (px > 0 ? 0.1f : 0.f);
-    int best = -1;
-    float bestV = -1e9f;
-    Vec2 bestAim;
-    for (int slot = 0; slot < 5; ++slot) {
-        int mi = side * 6 + slot;
-        const Body& m = bodies_[mi];
-        if (!m.active || mi == bi) continue;
-        Vec2 aim = m.pos + m.vel * 0.45f;
-        Vec2 v0;
-        constrainRink(aim, v0, 2.f, 0);
-        float pd = dist(b.pos, aim);
-        if (pd < 8.f || pd > 85.f) continue;
-        float lane = 99.f;
-        for (int o = 0; o < 6; ++o) {
-            const Body& ob = bodies_[(1 - side) * 6 + o];
-            if (ob.active) lane = std::min(lane, distToSegment(ob.pos, b.pos, aim));
-        }
-        if (lane < 1.6f) continue;
-        float risk = std::exp(-(lane - 1.6f) / 2.6f);
-        float open = nearestOpponent(side, aim);
-        float adv = ((aim.x - b.pos.x) * s) / 45.f;
-        float score = aim.x * s > rink::kBlueLineX ? baseShotQuality(side, aim) * 5.f : 0.f;
-        if (aim.x * s > rink::kBlueLineX && std::fabs(aim.y - b.pos.y) > 14.f && score > 0.4f) score *= 1.35f;
-        float v = adv + score + 0.03f * std::min(open, 15.f) - 0.25f * std::max(0.f, 5.f - open) - 1.4f * risk;
-        if (v > bestV) { bestV = v; best = mi; bestAim = aim; }
-    }
-    if (best >= 0 && b.possessedFor > 0.25f) {
-        float margin = bestV - myVal;
-        float pPass = 1.f / (1.f + std::exp(-(margin - 0.15f) * 6.f));
-        if (pressureD < 4.f) pPass = std::min(1.f, pPass * 1.5f + 0.1f);
-        pPass *= 0.6f + 0.4f * n01(P.r.passing);
-        if (rng_.chance(pPass)) {
-            float pd = dist(b.pos, bestAim);
-            float sp = std::clamp(pd * 0.9f + 28.f, 35.f, 78.f);
-            // From behind the red line, keep a missed pass from rolling out for icing (never below what reaches the target).
-            float ahead = (bestAim.x - b.pos.x) * s / std::max(pd, 1.f);
-            if (px < 0 && ahead > 0.05f) sp = std::min(sp, std::max(speedToRoll((rink::kGoalLineX - px) / ahead - 4.f), speedToRoll(pd + 10.f)));
-            pass(b, best, sp, bestAim);
-            return;
-        }
+    // How crowded is the ice between us and their net? Defenders standing up at their blue line make carrying in hard.
+    int stacked = 0;
+    for (int o = 0; o < 5; ++o) {
+        const Body& ob = bodies_[(1 - side) * 6 + o];
+        if (!ob.active) continue;
+        float ox = ob.pos.x * s;
+        if (ox > px && ox < rink::kGoalLineX && std::fabs(ob.pos.y - b.pos.y) < 30.f && dist(ob.pos, b.pos) < 38.f) ++stacked;
     }
 
-    // Dump it in (only once over the red line, or it's icing), or clear it out.
-    if (!inOZ && px > 2.f && px < 24.f && pressureD < 9.f && rng_.chance(0.25f)) {
-        chip(b, Vec2(s * 94.f, (rng_.chance(0.5f) ? 1.f : -1.f) * 30.f), 62.f);
-        return;
-    }
-    if (inDZ && pressureD < 4.f && rng_.chance(0.3f)) {
-        // Off the boards toward the neutral zone, hard enough to get out but meant to die before the far goal line.
-        // A shorthanded team can fire it the length of the ice.
-        Vec2 aim(s * 10.f, (b.pos.y >= 0 ? 1.f : -1.f) * 40.f);
-        bool pk = skatersFor(side) < skatersFor(1 - side);
-        float roll = pk ? 250.f : dist(b.pos, aim) + rng_.range(15.f, 55.f);
-        chip(b, aim, std::clamp(speedToRoll(roll), 40.f, 72.f));
-        return;
-    }
-
-    // Carry.
+    // Where would I skate with it?
     Vec2 t;
     if (!inOZ) {
         float lane = b.slot == 0 ? 0.f : ((b.slot == 1 || b.slot == 3) ? s : -s) * 20.f;
@@ -839,15 +893,13 @@ void Game::carrierThink(Body& b) {
         // Drive the net only through an open lane; otherwise work the perimeter (cycle low, or up high).
         float d = dist(b.pos, net);
         Vec2 slotPt(s * 74.f, b.pos.y * 0.3f);
-        float laneBlock = 99.f;
-        for (int o = 0; o < 5; ++o) {
-            const Body& ob = bodies_[(1 - side) * 6 + o];
-            if (ob.active) laneBlock = std::min(laneBlock, distToSegment(ob.pos, b.pos, slotPt));
-        }
+        float laneBlock = laneSpace(side, b.pos, slotPt);
         float side_ = b.pos.y >= 0 ? 1.f : -1.f;
-        if (laneBlock > 6.f) t = d > 28.f ? Vec2(s * 76.f, b.pos.y * 0.55f) : Vec2(s * 80.f, b.pos.y * 0.35f);
+        if (laneBlock > 6.f - 2.f * tc.chase) t = d > 28.f ? Vec2(s * 76.f, b.pos.y * 0.55f) : Vec2(s * 80.f, b.pos.y * 0.35f);
         else if (px > 70.f) t = Vec2(s * 52.f, side_ * 30.f);
         else t = Vec2(s * 85.f, side_ * 27.f);
+        // Protecting a lead: take it low and wear the clock down along the wall.
+        if (tc.protect > 0.3f && pressureD > 6.f && rng_.chance(tc.protect * 0.5f)) t = Vec2(s * 84.f, side_ * 30.f);
     }
     for (int o = 0; o < 5; ++o) {
         const Body& ob = bodies_[(1 - side) * 6 + o];
@@ -858,6 +910,104 @@ void Game::carrierThink(Body& b) {
     }
     t.x = std::clamp(t.x, -86.f, 86.f);
     t.y = std::clamp(t.y, -38.f, 38.f);
+    float room = laneSpace(side, b.pos, b.pos + (t - b.pos).norm() * 18.f);
+
+    // Value of keeping it. In the offensive zone that's the chance I can create myself; elsewhere it's the ice I can gain.
+    float keepV;
+    if (inOZ) {
+        keepV = q * 9.f + 0.025f * std::min(pressureD, 15.f) + 0.1f + 0.15f + 0.25f * tc.protect;
+    } else {
+        keepV = 0.2f + 0.03f * std::min(room, 15.f) + 0.02f * std::min(pressureD, 15.f) + 0.06f + 0.18f * skill + 0.08f * tc.style + 0.2f * b.read -
+                0.08f * std::max(0.f, 6.f - pressureD);
+        if (!inDZ) keepV -= 0.12f * float(std::max(0, stacked - 2));
+        if (tc.pp) keepV += 0.15f;  // power plays set up with control
+    }
+
+    // Best pass.
+    int best = -1;
+    float bestV = -1e9f;
+    Vec2 bestAim;
+    for (int slot = 0; slot < 5; ++slot) {
+        int mi = side * 6 + slot;
+        const Body& m = bodies_[mi];
+        if (!m.active || mi == bi) continue;
+        // Lead the receiver by the puck's travel time (it slows as it goes).
+        float pd0 = dist(b.pos, m.pos);
+        float tt = std::min(pd0 / (0.85f * std::clamp(pd0 * 0.9f + 28.f, 35.f, 78.f)), 1.1f);
+        Vec2 aim = m.pos + m.vel * std::max(0.3f, tt);
+        Vec2 v0;
+        constrainRink(aim, v0, 2.f, 0);
+        float pd = dist(b.pos, aim);
+        if (pd < 8.f || pd > 85.f) continue;
+        float lane = 99.f;
+        for (int o = 0; o < 6; ++o) {
+            const Body& ob = bodies_[(1 - side) * 6 + o];
+            if (ob.active) lane = std::min(lane, distToSegment(ob.pos, b.pos, aim));
+        }
+        if (lane < 1.6f) continue;
+        float risk = std::exp(-(lane - 1.6f) / 2.6f) * (1.f + 0.6f * tc.protect);
+        float open = nearestOpponent(side, aim);
+        float adv = ((aim.x - b.pos.x) * s) / 45.f;
+        float ax = aim.x * s;
+        float score = ax > rink::kBlueLineX ? baseShotQuality(side, aim) * 5.f : 0.f;
+        if (ax > rink::kBlueLineX && std::fabs(aim.y - b.pos.y) > 14.f && score > 0.4f) score *= 1.35f + 0.3f * tc.chase;
+        float v = adv + score + 0.03f * std::min(open, 15.f) - 0.25f * std::max(0.f, 5.f - open) - 1.4f * risk;
+        if (!inOZ) {
+            v -= 0.006f * std::max(0.f, pd - 30.f);  // long stretch passes are harder to land
+            v -= 0.2f * std::max(0.f, 7.f - open);     // don't force it to a covered man outside the zone
+            // Entry pass: hitting a winger with speed across the line keeps possession.
+            if (px < rink::kBlueLineX && ax > rink::kBlueLineX + 2.f && dot(m.vel, Vec2(s, 0)) > 12.f && open > 6.f) v += 0.15f + 0.2f * tc.style;
+            // Regroup: back to a defenseman when the far blue line is stacked.
+            if (adv < 0 && m.slot >= 3 && !inDZ && stacked >= 3 && open > 10.f) v += 0.4f;
+        }
+        v -= 0.07f + 0.15f * (1.f - n01(P.r.passing));
+        if (v > bestV) { bestV = v; best = mi; bestAim = aim; }
+    }
+
+    // Get it deep (only once over the red line, or it's icing).
+    float dumpV = -1e9f;
+    bool tired = (b.slot < 3 ? T.fShift > 0.85f * kFShift[T.fLine] : T.dShift > 0.85f * kDShift[T.dLine]);
+    if (!inOZ && !inDZ && px > 2.f && px < rink::kBlueLineX - 1.f) {
+        dumpV = 0.3f + 0.17f * float(std::max(0, stacked - 1)) + 0.25f * (1.f - tc.style) + (tired ? 0.45f : 0.f) + 0.4f * tc.protect -
+                0.08f - 0.25f * skill + (pressureD < 5.f ? 0.25f : 0.f) - 0.3f * b.read - (tc.pp ? 0.35f : 0.f);
+    }
+    // Clear it off the glass / boards.
+    float clearV = -1e9f;
+    if (inDZ) {
+        clearV = -0.25f + (pressureD < 4.f ? 0.75f : pressureD < 7.f ? 0.3f : 0.f) + (tc.pk ? 0.5f : 0.f) + 0.35f * tc.protect +
+                 0.2f * (1.f - tc.style) - 0.1f - 0.2f * skill - 0.2f * b.read;
+    }
+
+    float vKeep = keepV + rng_.normal(0, sd * 0.5f);
+    float vPass = (best >= 0 && b.possessedFor > 0.25f) ? bestV + rng_.normal(0, sd) : -1e9f;
+    if (pressureD < 4.f) vPass += 0.15f;  // pressured: move it
+    float vDump = dumpV + rng_.normal(0, sd * 0.4f);
+    float vClear = clearV + rng_.normal(0, sd * 0.4f);
+
+    if (vPass >= vKeep && vPass >= vDump && vPass >= vClear) {
+        float pd = dist(b.pos, bestAim);
+        float sp = std::clamp(pd * 0.9f + 28.f, 35.f, 78.f);
+        // From behind the red line, keep a missed pass from rolling out for icing (never below what reaches the target).
+        float ahead = (bestAim.x - b.pos.x) * s / std::max(pd, 1.f);
+        if (px < 0 && ahead > 0.05f) sp = std::min(sp, std::max(speedToRoll((rink::kGoalLineX - px) / ahead - 4.f), speedToRoll(pd + 10.f)));
+        pass(b, best, sp, bestAim);
+        return;
+    }
+    if (vDump > vKeep && vDump >= vClear) {
+        Vec2 aim = dumpTarget(side, b.pos);
+        chip(b, aim, std::clamp(speedToRoll(dist(b.pos, aim) + rng_.range(5.f, 25.f)), 45.f, 66.f), true);
+        return;
+    }
+    if (vClear > vKeep) {
+        // Off the boards toward the neutral zone, hard enough to get out but meant to die before the far goal line.
+        // A shorthanded team can fire it the length of the ice.
+        Vec2 aim(s * 10.f, (b.pos.y >= 0 ? 1.f : -1.f) * 40.f);
+        float roll = tc.pk ? 250.f : dist(b.pos, aim) + rng_.range(15.f, 80.f);
+        chip(b, aim, std::clamp(speedToRoll(roll), 40.f, 72.f), false);
+        return;
+    }
+
+    // Carry.
     b.target = t;
     b.urgency = 1.f;
 }
@@ -867,8 +1017,10 @@ void Game::carrierThink(Body& b) {
 void Game::gainControl(Body& b) {
     int bi = int(&b - &bodies_[0]);
     bool wasTarget = puck_.passTarget == bi;
+    if (wasTarget) tg_[b.team].passesDone++;
     puck_.carrier = bi;
     puck_.passTarget = -1;
+    puck_.dumped = false;
     puck_.shot.live = false;
     puck_.goalBound = false;
     puck_.idle = 0;
@@ -876,6 +1028,7 @@ void Game::gainControl(Body& b) {
     puck_.iceTeam = -1;
     b.possessedFor = 0;
     b.think = rng_.range(0.08f, 0.2f);
+    b.read = rng_.normal(0, 0.5f);
     if (touches_.empty() || touches_.back().team != b.team) touches_.clear();
     if (touches_.empty() || touches_.back().roster != b.roster) touches_.push_back({b.team, b.roster});
     if (touches_.size() > 6) touches_.erase(touches_.begin());
@@ -893,6 +1046,7 @@ void Game::loosePuck(Vec2 vel) {
     puck_.carrier = -1;
     puck_.vel = vel;
     puck_.passTarget = -1;
+    puck_.dumped = false;
     puck_.iceTeam = -1;
 }
 
@@ -920,7 +1074,7 @@ void Game::shoot(Body& b) {
     g_diag.mods[0] += oneTimer; g_diag.mods[1] += (time_ - tg_[1 - side].lastSave < 2.f && d < 25.f); g_diag.mods[2] += screened; g_diag.mods[3] += (between == 0 && d < 40.f); g_diag.mods[4]++;
 #endif
     if (screened) q *= 1.15f;
-    if (skatersFor(side) > skatersFor(1 - side)) q *= 1.3f;  // man advantage: seams the 2D model doesn't capture
+    if (skatersFor(side) > skatersFor(1 - side)) q *= 1.55f;  // man advantage: seams the 2D model doesn't capture
     if (between == 0 && d < 40.f) q *= 1.25f;  // nobody back: rush chance
 
     float pOn = std::clamp(0.64f + 0.05f * z - 0.0025f * (d - 25.f) - (oneTimer ? 0.06f : 0.f), 0.4f, 0.88f);
@@ -934,6 +1088,7 @@ void Game::shoot(Body& b) {
     puck_.pos = b.pos + dirv * 1.8f;
     puck_.vel = dirv * speed;
     puck_.passTarget = -1;
+    puck_.dumped = false;
     puck_.lastTeam = side;
     ShotInfo& sh = puck_.shot;
     sh = ShotInfo{};
@@ -958,13 +1113,16 @@ void Game::pass(Body& from, int toBody, float speed, Vec2 aim) {
     puck_.vel = dirv * speed + from.vel * 0.25f;
     puck_.passTarget = toBody;
     puck_.passFrom = from.pos;
+    puck_.passAim = aim;
+    puck_.dumped = false;
     puck_.shot.live = false;
     puck_.lastTeam = from.team;
     from.ignorePuck = 0.3f;
+    tg_[from.team].passes++;
     armIcing(from.team, from.pos);
 }
 
-void Game::chip(Body& from, Vec2 aim, float speed) {
+void Game::chip(Body& from, Vec2 aim, float speed, bool dumpIn) {
     Vec2 dirv = rotate((aim - from.pos).norm(), rng_.normal(0, 0.06f));
     puck_.carrier = -1;
     puck_.pos = from.pos + dirv * 1.8f;
@@ -972,6 +1130,7 @@ void Game::chip(Body& from, Vec2 aim, float speed) {
     puck_.passTarget = -1;
     puck_.shot.live = false;
     puck_.lastTeam = from.team;
+    puck_.dumped = dumpIn;
     from.ignorePuck = 0.4f;
     armIcing(from.team, from.pos);
 }
@@ -1235,6 +1394,26 @@ bool Game::checkIcing(Vec2 prev) {
     return true;
 }
 
+// Classifies each offensive-zone entry as a carry, a pass or a dump (chip, rim or long shot).
+void Game::trackEntries() {
+    for (int side = 0; side < 2; ++side) {
+        float px = puck_.pos.x * float(tg_[side].dir);
+        if (inZone_[side]) {
+            if (px < rink::kNeutralDotX) inZone_[side] = false;  // back out past the neutral-zone dots: a fresh entry
+            continue;
+        }
+        if (px <= rink::kBlueLineX) continue;
+        inZone_[side] = true;
+        TeamGame& T = tg_[side];
+        if (puck_.carrier >= 0) {
+            if (bodies_[puck_.carrier].team == side) T.entCarry++;
+        } else if (puck_.lastTeam == side) {
+            if (puck_.passTarget >= 0 && bodies_[puck_.passTarget].team == side) T.entPass++;
+            else if (puck_.dumped) T.entDump++;  // clears, rebounds and deflections that drift in aren't entries
+        }
+    }
+}
+
 void Game::puckControl(float) {
     if (puck_.carrier >= 0 || puck_.goalBound) return;
 
@@ -1260,6 +1439,7 @@ void Game::puckControl(float) {
             puck_.vel = dirv * 40.f;
             puck_.passTarget = mate;
             puck_.passFrom = g.pos;
+            puck_.passAim = aim;
             puck_.lastTeam = side;
             g.ignorePuck = 1.f;
             armIcing(side, g.pos);
@@ -1277,8 +1457,9 @@ void Game::puckControl(float) {
         float rel = (puck_.vel - b.vel).len();
         if (puck_.shot.live && puck_.shot.team != b.team && rel > 40.f) continue;  // blocks handled in flight
         float pc = (0.55f + 0.4f * n01(pl(b).r.handling)) * std::clamp(1.2f - rel / 55.f, 0.12f, 1.f);
-        if (puck_.passTarget == i) pc = std::min(0.97f, pc + 0.25f);
-        if (nearestOpponent(b.team, b.pos) < 3.f) pc *= 0.65f;  // contested reception
+        // The intended receiver has his stick down for it: a crisp pass is far easier for him than for anyone else.
+        if (puck_.passTarget == i) pc = std::min(0.97f, (0.64f + 0.22f * n01(pl(b).r.handling)) * std::clamp(1.35f - rel / 90.f, 0.3f, 1.f) + 0.25f);
+        if (nearestOpponent(b.team, b.pos) < 3.f) pc *= puck_.passTarget == i ? 0.8f : 0.65f;  // contested reception
         if (rng_.chance(pc)) {
             if (puck_.lastTeam >= 0 && puck_.lastTeam != b.team && puck_.passTarget >= 0) {
                 tg_[b.team].takeaways++;
@@ -1301,7 +1482,7 @@ void Game::pressure(float h) {
         if (dist(o.pos, c.pos) > 3.4f) continue;
         const Player& op = pl(o);
         float hitR = tune::hitRate * (0.35f + 1.1f * n01(op.r.checking));
-        float pokeR = tune::pokeRate * (0.5f + 0.8f * n01(op.r.defense)) * (1.25f - 0.6f * n01(cp.r.handling));
+        float pokeR = tune::pokeRate * (0.5f + 0.8f * n01(op.r.defense)) * (1.12f - 0.34f * n01(cp.r.handling));
         if (rng_.rate(hitR, h)) {
             tg_[os].hits++;
             tg_[os].stats[o.roster].hits++;

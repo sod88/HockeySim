@@ -65,6 +65,9 @@ struct TeamGame {
     float fShift = 0, dShift = 0;
     std::vector<Penalty> box;
     float lastSave = -100;  // game time of this team's goalie's last rebound save
+    // Play-style counters (headless_sim prints league-wide shares).
+    int entCarry = 0, entPass = 0, entDump = 0;  // offensive-zone entries by type
+    int passes = 0, passesDone = 0;
 };
 
 // One on-ice slot: 0 C, 1 LW, 2 RW, 3 LD, 4 RD, 5 G. Bodies are indexed team*6 + slot.
@@ -75,6 +78,7 @@ struct Body {
     Vec2 target;
     float urgency = 1;  // fraction of top speed wanted
     float stun = 0, ignorePuck = 0, think = 0, controlCooldown = 0, possessedFor = 0, oneTimerUntil = -1;
+    float read = 0;  // carrier's lean for this possession: > 0 looks to make a play, < 0 looks to get it deep
     bool isGoalie() const { return slot == 5; }
 };
 
@@ -95,7 +99,8 @@ struct Puck {
     bool goalBound = false;
     int lastTeam = -1;
     int passTarget = -1;
-    Vec2 passFrom;
+    bool dumped = false;  // last sent in by a deliberate dump-in (for entry stats)
+    Vec2 passFrom, passAim;  // where the pass was made from and the spot it was led to
     ShotInfo shot;
     float idle = 0;
     int iceTeam = -1;  // team that sent the puck from behind the red line, untouched since (-1 = no icing possible)
@@ -137,6 +142,7 @@ public:
     int skatersFor(int side) const;
     std::string periodLabel() const;
     std::string strengthLabel(int side) const;  // "PP", "SH" or ""
+    std::string planLabel(int side) const;      // current game plan, e.g. "Possession", "Protect lead"
 
 private:
     const League& league_;
@@ -155,6 +161,7 @@ private:
     int noChangeSide_ = -1;  // iced the puck: can't change lines for the next faceoff
     struct Touch { int team, roster; };
     std::vector<Touch> touches_;
+    std::array<bool, 2> inZone_{};  // puck is in this side's offensive zone (with hysteresis), for entry counting
 
     // flow
     void tick(float h);
@@ -171,6 +178,16 @@ private:
     void lineChanges(int side, bool atStoppage);
     std::vector<int> activeSlots(int side) const;
 
+    // Situational game plan, from the team's style, score, clock and manpower.
+    struct Tactics {
+        float style = 0.5f;       // 0 dump-and-chase .. 1 possession (Team::style)
+        float protect = 0;        // 0..1 leading late: safe plays, chip it out, trap
+        float chase = 0;          // 0..1 trailing late: shoot more, pinch, forecheck hard
+        float aggression = 0.5f;  // forecheck depth and pinches
+        bool pp = false, pk = false;
+    };
+    Tactics tactics(int side) const;
+
     // play
     void teamAI(int side, float h);
     void carrierThink(Body& b);
@@ -184,13 +201,14 @@ private:
     void pressure(float h);
     void shoot(Body& b);
     void pass(Body& from, int toBody, float speed, Vec2 aimPoint);
-    void chip(Body& from, Vec2 aim, float speed);
+    void chip(Body& from, Vec2 aim, float speed, bool dumpIn);
     void gainControl(Body& b);
     void loosePuck(Vec2 vel);
     void resolveAtNet(int defendingSide, bool atLine);
     void scoreGoal(int scoringSide);
     void callPenalty(int side, int roster, const char* infraction);
     void armIcing(int side, Vec2 from);
+    void trackEntries();
     bool checkIcing(Vec2 prev);
 
     // helpers
@@ -203,6 +221,8 @@ private:
     Vec2 nearestDot(Vec2 p) const;
     Vec2 zoneDot(int defendingSide, float ySign) const;
     float nearestOpponent(int side, Vec2 p, int* who = nullptr) const;
+    float laneSpace(int side, Vec2 a, Vec2 b) const;  // closest opposing skater to the segment a-b
+    Vec2 dumpTarget(int side, Vec2 from) const;
     std::string shortName(const Body& b) const;
 };
 
