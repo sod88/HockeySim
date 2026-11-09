@@ -90,20 +90,40 @@ top 6 D in pairs, starter = the goalie with the most games.
   team's zone and they can't change lines. Shorthanded teams may ice it. The AI sizes
   clears and passes from its own half so they die before the goal line.
 
-### Calibration (400 headless games, `./build/headless_sim data 400`)
+### Calibration (200 headless games, `./build/headless_sim data 200`)
 
 | Per team per game | Sim | NHL |
 | --- | --- | --- |
-| Goals | 3.15 | 3.0–3.1 |
-| Shots on goal | 32.0 | 28–29 |
-| Shot attempts | 57.9 | 55–60 |
-| Blocked shots | 11.3 | 13–15 |
-| Hits | 23.2 | 20–24 |
-| Power plays | 3.08 | 2.8–3.2 |
-| Power-play % | 14.3% | 20–22% |
-| Icings | 3.98 | |
+| Goals | 2.79 | 3.0–3.1 |
+| Shots on goal | 28.4 | 28–29 |
+| Shot attempts | 52.1 | 55–60 |
+| Blocked shots | 11.2 | 13–15 |
+| Hits | 20.9 | 20–24 |
+| Power plays | 2.79 | 2.8–3.2 |
+| Power-play % | 15.7% | 20–22% |
+| Icings | 1.44 | |
 | Save % | .901 | .900–.905 |
-| Games to OT | 17.2% | 22–25% |
+| Games to OT | 19.0% | 22–25% |
+| Zone entries | 49.0 | |
+| Carried in / passed in / dumped in | 19% / 44% / 37% | |
+| Pass completion | 73% | |
+
+Measured with `shootUrge = 0.024`; it was then nudged to 0.026 to lift goals and attempts
+slightly, so re-run before trusting the last digit.
+
+### Play selection and strategy
+
+- The puck carrier weighs carrying, passing, dumping it in and clearing it against each other,
+  from the pressure on him, the room ahead, how many defenders are standing up at the far blue
+  line, his own skill, shift fatigue, the team's style and the score and clock.
+- Each team has a style from dump-and-chase to puck possession (`Team::style`, from roster skill
+  vs physicality; listed by `headless_sim --ratings`). Possession teams carry and pass the puck
+  in more; dump-and-chase teams get it deep and forecheck harder.
+- Late in the third period a team protecting a lead chips pucks out, avoids risky passes and
+  sits back, while a team chasing the game shoots more, crashes the net and pinches.
+- Defenders keep a gap through the neutral zone and stand the rush up at their blue line; a
+  second forward supports the forecheck when the plan is aggressive enough.
+- The viewer shows each team's current plan under the score bar.
 
 Tuning knobs live in `namespace tune` at the top of `Game.cpp`.
 `headless_sim --box EDM COL` prints one full box score; `--ratings` lists team ratings;

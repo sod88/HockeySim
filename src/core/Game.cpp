@@ -18,7 +18,7 @@ constexpr float kPuckR = 0.25f;
 
 // Calibration knobs. tools/headless_sim checks league-wide output against NHL averages.
 namespace tune {
-constexpr float shootUrge = 0.024f;    // per carrier decision, scaled by shot quality and shot rate
+constexpr float shootUrge = 0.026f;    // per carrier decision, scaled by shot quality and shot rate
 constexpr float goalScale = 0.61f;     // multiplies P(goal | on net)
 constexpr float hitRate = 0.076f;      // per second while an opponent is within reach of the carrier
 constexpr float pokeRate = 0.22f;      // stick checks per second, same condition
