@@ -78,6 +78,10 @@ top 6 D in pairs, starter = the goalie with the most games.
   (perimeter play when the lane to the net is closed). Teammates fill offensive spots
   (net-front, high slot, points, weak side) or breakout lanes; the defending team
   pressures the carrier and marks goal-side.
+- Passes lead the receiver by the puck's real travel time (from its friction and the pass
+  speed) and go where the passer aims; aim error shrinks with the passing rating. The intended
+  receiver skates onto the puck's line, and a pass he fumbles bobbles at his feet instead of
+  sliding past him.
 - Shots: release quality from distance, angle and shooter rating, plus one-timers,
   rebounds, screens and rushes. Shots can be blocked, miss the net, or reach the goalie,
   whose save chance depends on his save % and on whether he's set in position (cross-ice
@@ -94,19 +98,19 @@ top 6 D in pairs, starter = the goalie with the most games.
 
 | Per team per game | Sim | NHL |
 | --- | --- | --- |
-| Goals | 3.02 | 3.0–3.1 |
-| Shots on goal | 29.4 | 28–29 |
-| Shot attempts | 54.1 | 55–60 |
-| Blocked shots | 11.4 | 13–15 |
-| Hits | 20.5 | 20–24 |
-| Power plays | 2.67 | 2.8–3.2 |
-| Power-play % | 16.7% | 20–22% |
-| Icings | 1.33 | |
-| Save % | .897 | .900–.905 |
-| Games to OT | 17.0% | 22–25% |
-| Zone entries | 49.1 | |
-| Carried in / passed in / dumped in | 19% / 43% / 38% | |
-| Pass completion | 72% | |
+| Goals | 3.16 | 3.0–3.1 |
+| Shots on goal | 30.5 | 28–29 |
+| Shot attempts | 56.6 | 55–60 |
+| Blocked shots | 11.6 | 13–15 |
+| Hits | 22.5 | 20–24 |
+| Power plays | 3.20 | 2.8–3.2 |
+| Power-play % | 17.9% | 20–22% |
+| Icings | 0.30 | |
+| Save % | .896 | .900–.905 |
+| Games to OT | 18.0% | 22–25% |
+| Zone entries | 43.0 | |
+| Carried in / passed in / dumped in | 28% / 33% / 39% | |
+| Pass completion (to the intended teammate) | 91% | |
 
 ### Play selection and strategy
 
@@ -130,6 +134,8 @@ Tuning knobs live in `namespace tune` at the top of `Game.cpp`.
 
 - No offside yet; line changes swap players in place instead of using the bench door.
 - Power plays convert low, blocks run a little low and OT is a little rare; all are tuning targets.
+- Icings are now rare (accurate passes rarely roll the length of the ice), and the AI never
+  ices it deliberately under pressure; worth tuning.
 - Skating speed is a proxy until a tracking-data source is added.
 - Ideas: a season mode with standings, trades and injuries; a player-controlled skater;
   real jersey numbers and depth-chart overrides from a config file.

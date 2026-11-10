@@ -18,8 +18,8 @@ constexpr float kPuckR = 0.25f;
 
 // Calibration knobs. tools/headless_sim checks league-wide output against NHL averages.
 namespace tune {
-constexpr float shootUrge = 0.026f;    // per carrier decision, scaled by shot quality and shot rate
-constexpr float goalScale = 0.61f;     // multiplies P(goal | on net)
+constexpr float shootUrge = 0.021f;    // per carrier decision, scaled by shot quality and shot rate
+constexpr float goalScale = 0.57f;     // multiplies P(goal | on net)
 constexpr float hitRate = 0.076f;      // per second while an opponent is within reach of the carrier
 constexpr float pokeRate = 0.22f;      // stick checks per second, same condition
 constexpr float blockChance = 0.78f;   // when a shot passes within reach of a defender
@@ -39,6 +39,18 @@ float speedToRoll(float d) {
     float lo = 0, hi = 150;
     for (int i = 0; i < 30; ++i) { float m = 0.5f * (lo + hi); (rollDistance(m) < d ? lo : hi) = m; }
     return lo;
+}
+// Seconds for a puck released at v to cover d feet under the same friction (when it stops, if it never gets there).
+float rollTime(float v, float d) {
+    const float c = 5.f / 0.15f;
+    float stop = std::log1p(v / c) / 0.15f;
+    if (rollDistance(v) <= d) return stop;
+    float lo = 0, hi = stop;
+    for (int i = 0; i < 24; ++i) {
+        float t = 0.5f * (lo + hi), e = std::exp(-0.15f * t);
+        ((v + c) * (1.f - e) / 0.15f - c * t < d ? lo : hi) = t;
+    }
+    return hi;
 }
 
 // Keeps a circle of radius r inside the rounded-rectangle boards. Returns true on contact.
@@ -925,18 +937,29 @@ void Game::carrierThink(Body& b) {
 
     // Best pass.
     int best = -1;
-    float bestV = -1e9f;
+    float bestV = -1e9f, bestSp = 0;
     Vec2 bestAim;
+    // Pass speed for a target: firmer for longer passes; from behind the red line, soft enough that a miss
+    // dies before the far goal line (icing), but never too soft to get there.
+    auto passSpeed = [&](Vec2 aim) {
+        float pd = dist(b.pos, aim);
+        float sp = std::clamp(pd * 0.9f + 28.f, 35.f, 78.f);
+        float ahead = (aim.x - b.pos.x) * s / std::max(pd, 1.f);
+        if (px < 0 && ahead > 0.05f) sp = std::min(sp, std::max(speedToRoll((rink::kGoalLineX - px) / ahead - 4.f), speedToRoll(pd + 10.f)));
+        return sp;
+    };
     for (int slot = 0; slot < 5; ++slot) {
         int mi = side * 6 + slot;
         const Body& m = bodies_[mi];
         if (!m.active || mi == bi) continue;
-        // Lead the receiver by the puck's travel time (it slows as it goes).
-        float pd0 = dist(b.pos, m.pos);
-        float tt = std::min(pd0 / (0.85f * std::clamp(pd0 * 0.9f + 28.f, 35.f, 78.f)), 1.1f);
-        Vec2 aim = m.pos + m.vel * std::max(0.3f, tt);
-        Vec2 v0;
-        constrainRink(aim, v0, 2.f, 0);
+        // Lead the receiver by how long this pass will really take to get there (the puck slows as it goes).
+        Vec2 aim = m.pos, v0;
+        float sp = 0;
+        for (int it = 0; it < 3; ++it) {
+            sp = passSpeed(aim);
+            aim = m.pos + m.vel * std::min(rollTime(sp, dist(b.pos, aim)), 1.6f);
+            constrainRink(aim, v0, 2.f, 0);
+        }
         float pd = dist(b.pos, aim);
         if (pd < 8.f || pd > 85.f) continue;
         float lane = 99.f;
@@ -961,7 +984,7 @@ void Game::carrierThink(Body& b) {
             if (adv < 0 && m.slot >= 3 && !inDZ && stacked >= 3 && open > 10.f) v += 0.4f;
         }
         v -= 0.07f + 0.15f * (1.f - n01(P.r.passing));
-        if (v > bestV) { bestV = v; best = mi; bestAim = aim; }
+        if (v > bestV) { bestV = v; best = mi; bestAim = aim; bestSp = sp; }
     }
 
     // Get it deep (only once over the red line, or it's icing).
@@ -985,12 +1008,7 @@ void Game::carrierThink(Body& b) {
     float vClear = clearV + rng_.normal(0, sd * 0.4f);
 
     if (vPass >= vKeep && vPass >= vDump && vPass >= vClear) {
-        float pd = dist(b.pos, bestAim);
-        float sp = std::clamp(pd * 0.9f + 28.f, 35.f, 78.f);
-        // From behind the red line, keep a missed pass from rolling out for icing (never below what reaches the target).
-        float ahead = (bestAim.x - b.pos.x) * s / std::max(pd, 1.f);
-        if (px < 0 && ahead > 0.05f) sp = std::min(sp, std::max(speedToRoll((rink::kGoalLineX - px) / ahead - 4.f), speedToRoll(pd + 10.f)));
-        pass(b, best, sp, bestAim);
+        pass(b, best, bestSp, bestAim);
         return;
     }
     if (vDump > vKeep && vDump >= vClear) {
@@ -1106,11 +1124,12 @@ void Game::shoot(Body& b) {
 }
 
 void Game::pass(Body& from, int toBody, float speed, Vec2 aim) {
-    float err = (0.02f + 0.07f * (1.f - n01(pl(from).r.passing))) * rng_.normal(0, 1);
+    // NHL passers are all good: an average one misses by about a foot and a half over 50 ft.
+    float err = (0.012f + 0.04f * (1.f - n01(pl(from).r.passing))) * rng_.normal(0, 1);
     Vec2 dirv = rotate((aim - from.pos).norm(), err);
     puck_.carrier = -1;
     puck_.pos = from.pos + dirv * 1.8f;
-    puck_.vel = dirv * speed + from.vel * 0.25f;
+    puck_.vel = dirv * speed;  // the passer allows for his own skating, so the pass goes where he aimed it
     puck_.passTarget = toBody;
     puck_.passFrom = from.pos;
     puck_.passAim = aim;
@@ -1223,7 +1242,8 @@ void Game::updatePuck(float h) {
             }
         }
     }
-    if (p.passTarget >= 0 && p.vel.len() < 10.f) p.passTarget = -1;
+    // A pass is over once it has died away from the man it was meant for (a bobble at his feet is still his).
+    if (p.passTarget >= 0 && p.vel.len() < 10.f && dist(bodies_[p.passTarget].pos, p.pos) > 6.f) p.passTarget = -1;
 }
 
 void Game::resolveAtNet(int defending, bool atLine) {
@@ -1460,7 +1480,13 @@ void Game::puckControl(float) {
         // The intended receiver has his stick down for it: a crisp pass is far easier for him than for anyone else.
         if (puck_.passTarget == i) pc = std::min(0.97f, (0.64f + 0.22f * n01(pl(b).r.handling)) * std::clamp(1.35f - rel / 90.f, 0.3f, 1.f) + 0.25f);
         if (nearestOpponent(b.team, b.pos) < 3.f) pc *= puck_.passTarget == i ? 0.8f : 0.65f;  // contested reception
-        if (rng_.chance(pc)) {
+        if (!rng_.chance(pc)) {
+            if (puck_.passTarget == i) {
+                // Bobbled: it pops off his stick and stays at his feet rather than sliding on through him.
+                puck_.vel = b.vel * 0.6f + rotate(puck_.vel.norm(), rng_.range(-1.2f, 1.2f)) * rng_.range(4.f, 9.f);
+                b.controlCooldown = 0.18f;
+            }
+        } else {
             if (puck_.lastTeam >= 0 && puck_.lastTeam != b.team && puck_.passTarget >= 0) {
                 tg_[b.team].takeaways++;
                 tg_[b.team].stats[b.roster].takeaways++;
