@@ -557,6 +557,12 @@ void drawTopBar(const App& a) {
             if (right) textRight(lab, bx - 10, 22, 16, lc);
             else text(lab, bx + 240, 22, 16, lc);
         }
+        // Current game plan (team style, or the situational mode late in a close game).
+        std::string plan = g.planLabel(side);
+        if (!plan.empty()) {
+            if (right) textRight(plan, bx - 10, 42, 10, kDim);
+            else text(plan, bx + 240, 42, 10, kDim);
+        }
     };
     teamBlock(1, 16, false);
     teamBlock(0, kW - 16, true);

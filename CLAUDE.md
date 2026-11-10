@@ -48,4 +48,4 @@ Three CMake targets: `hkcore` (static lib, `src/core/`, **no graphics dependenci
 
 ## Known gaps (from README)
 
-No offside; power-play %, blocked shots and OT frequency run below NHL targets; skating is a proxy rating.
+No offside; power-play %, blocked shots and OT frequency run below NHL targets; skating is a proxy rating. Icings run low (about 1.3 per team) now that panic clears are rare, and the shot gap between strong and weak teams is wider than the NHL's.

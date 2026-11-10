@@ -64,11 +64,11 @@ int main(int argc, char** argv) {
         std::vector<int> idx(L.teams.size());
         for (size_t i = 0; i < idx.size(); ++i) idx[i] = int(i);
         std::sort(idx.begin(), idx.end(), [&](int a, int b) { return L.teams[size_t(a)].overall > L.teams[size_t(b)].overall; });
-        std::printf("\n%-4s %5s %5s %5s %5s  %s\n", "Team", "OVR", "OFF", "DEF", "G", "Top player");
+        std::printf("\n%-4s %5s %5s %5s %5s %5s  %s\n", "Team", "OVR", "OFF", "DEF", "G", "STYLE", "Top player");
         for (int i : idx) {
             const Team& t = L.teams[size_t(i)];
             const Player& top = t.players[size_t(t.lines.fwd[0][0])];
-            std::printf("%-4s %5.1f %5.1f %5.1f %5.1f  %s (%.0f)  real players: %d\n", t.info.abbr, t.overall, t.offense, t.defense, t.goaltending,
+            std::printf("%-4s %5.1f %5.1f %5.1f %5.1f %5.2f  %s (%.0f)  real players: %d\n", t.info.abbr, t.overall, t.offense, t.defense, t.goaltending, t.style,
                         top.name.c_str(), top.r.overall, t.realPlayers);
         }
     }
@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
 
     struct Rec { int gp = 0, w = 0, l = 0, otl = 0, gf = 0, ga = 0; };
     std::vector<Rec> rec(L.teams.size());
+    long entC = 0, entP = 0, entD = 0, passes = 0, passesDone = 0;
     long goals = 0, sog = 0, att = 0, hits = 0, blocks = 0, ppOpp = 0, ppG = 0, icing = 0, ot = 0, so = 0, saves = 0, shotsAgainst = 0;
     auto t0 = std::chrono::steady_clock::now();
     int n = season ? int(L.teams.size()) * 41 : games;
@@ -100,6 +101,7 @@ int main(int argc, char** argv) {
         for (int s = 0; s < 2; ++s) {
             const auto& T = g.side(s);
             goals += T.score - (g.wentToShootout() && T.score > g.side(1 - s).score ? 1 : 0);
+            entC += T.entCarry; entP += T.entPass; entD += T.entDump; passes += T.passes; passesDone += T.passesDone;
             sog += T.sog; att += T.attempts; hits += T.hits; blocks += T.blocks; ppOpp += T.ppOpp; ppG += T.ppGoals; icing += T.icings;
             const auto& G = T.stats[size_t(T.goalie)];
             saves += G.sv; shotsAgainst += G.sa;
@@ -131,6 +133,13 @@ int main(int argc, char** argv) {
     std::printf("%-26s %8.3f %10s\n", "save %", shotsAgainst ? double(saves) / shotsAgainst : 0.0, ".900-.905");
     std::printf("%-26s %7.1f%% %10s\n", "games to OT", 100.0 * ot / n, "22-25%");
     std::printf("%-26s %7.1f%% %10s\n", "games to shootout", 100.0 * so / n, "8-10%");
+    long ent = std::max(1L, entC + entP + entD);
+    std::printf("%-26s %8.1f %10s\n", "zone entries", ent / tg, "");
+    std::printf("%-26s %7.0f%% %10s\n", "  carried in", 100.0 * entC / ent, "");
+    std::printf("%-26s %7.0f%% %10s\n", "  passed in", 100.0 * entP / ent, "");
+    std::printf("%-26s %7.0f%% %10s\n", "  dumped/chipped in", 100.0 * entD / ent, "~45-55%");
+    std::printf("%-26s %8.1f %10s\n", "passes", passes / tg, "");
+    std::printf("%-26s %7.0f%% %10s\n", "  completed", passes ? 100.0 * passesDone / passes : 0.0, "");
 
 #ifdef HK_DIAG
     for (int k = 0; k < 2; ++k)
