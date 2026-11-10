@@ -94,22 +94,19 @@ top 6 D in pairs, starter = the goalie with the most games.
 
 | Per team per game | Sim | NHL |
 | --- | --- | --- |
-| Goals | 2.79 | 3.0–3.1 |
-| Shots on goal | 28.4 | 28–29 |
-| Shot attempts | 52.1 | 55–60 |
-| Blocked shots | 11.2 | 13–15 |
-| Hits | 20.9 | 20–24 |
-| Power plays | 2.79 | 2.8–3.2 |
-| Power-play % | 15.7% | 20–22% |
-| Icings | 1.44 | |
-| Save % | .901 | .900–.905 |
-| Games to OT | 19.0% | 22–25% |
-| Zone entries | 49.0 | |
-| Carried in / passed in / dumped in | 19% / 44% / 37% | |
-| Pass completion | 73% | |
-
-Measured with `shootUrge = 0.024`; it was then nudged to 0.026 to lift goals and attempts
-slightly, so re-run before trusting the last digit.
+| Goals | 3.02 | 3.0–3.1 |
+| Shots on goal | 29.4 | 28–29 |
+| Shot attempts | 54.1 | 55–60 |
+| Blocked shots | 11.4 | 13–15 |
+| Hits | 20.5 | 20–24 |
+| Power plays | 2.67 | 2.8–3.2 |
+| Power-play % | 16.7% | 20–22% |
+| Icings | 1.33 | |
+| Save % | .897 | .900–.905 |
+| Games to OT | 17.0% | 22–25% |
+| Zone entries | 49.1 | |
+| Carried in / passed in / dumped in | 19% / 43% / 38% | |
+| Pass completion | 72% | |
 
 ### Play selection and strategy
 
