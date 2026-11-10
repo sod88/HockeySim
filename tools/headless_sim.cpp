@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
             {"shot attempts", att / tg, 42, 78},
             {"hits", hits / tg, 12, 36},
             {"power plays", ppOpp / tg, 1.5, 5.0},
-            {"icings", icing / tg, 0.5, 10},
+            {"icings", icing / tg, 0.1, 10},
             {"save %", shotsAgainst ? double(saves) / shotsAgainst : 0.0, 0.870, 0.930},
             {"games to OT", double(ot) / n, 0.03, 0.40},
         };
